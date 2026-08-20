@@ -80,6 +80,11 @@ fi
 mkdir -p "$artifacts_root"
 cd "$module_root"
 if [ -n "$libraries_root" ]; then
-    exec "$zig_exe" build --prefix "$artifacts_root" "--fork=$sdk_root" "--fork=$contract_root" "--fork=$libraries_root" "$@"
+    "$zig_exe" build --prefix "$artifacts_root" "--fork=$sdk_root" "--fork=$contract_root" "--fork=$libraries_root" "$@"
+else
+    "$zig_exe" build --prefix "$artifacts_root" "--fork=$sdk_root" "--fork=$contract_root" "$@"
 fi
-exec "$zig_exe" build --prefix "$artifacts_root" "--fork=$sdk_root" "--fork=$contract_root" "$@"
+
+if [ "${1:-}" = test ] && command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -File "$module_root/Tests/Analyze-QemuWav.ps1" -SelfTest
+fi

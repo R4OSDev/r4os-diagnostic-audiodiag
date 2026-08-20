@@ -1,6 +1,6 @@
 .{
     .name = .r4os_audiod,
-    .version = "0.1.1",
+    .version = "0.2.0",
     .fingerprint = 0x712bc856a4f5a994,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
@@ -18,6 +18,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "Tests",
         "module.R4MF",
         "PROVENANCE.txt",
     },

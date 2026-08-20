@@ -78,4 +78,10 @@ pushd "%R4OS_MODULE_ROOT%" >nul || exit /b 1
 set "R4OS_EXIT_CODE=%ERRORLEVEL%"
 popd
 
+if not "%R4OS_EXIT_CODE%"=="0" exit /b %R4OS_EXIT_CODE%
+if /i "%~1"=="test" (
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%R4OS_MODULE_ROOT%\Tests\Analyze-QemuWav.ps1" -SelfTest
+    set "R4OS_EXIT_CODE=%ERRORLEVEL%"
+)
+
 exit /b %R4OS_EXIT_CODE%

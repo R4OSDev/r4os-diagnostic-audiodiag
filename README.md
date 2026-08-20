@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.1.1`
+- Version: `0.2.0`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -29,9 +29,17 @@ mapped local checkouts.
 
 ## Documentation
 
-Detailed German technical notes from the migration are preserved in
-`DOCUMENTATION.de.txt`. Source-transfer provenance is recorded in
-`PROVENANCE.txt`.
+Default mode emits deterministic 480-frame and variable-size packets for the
+QEMU WAV continuity gate. `/LONG` feeds a 60-second tone against the reported
+backend fill level. The result separates upstream drops, HDA underruns, stream
+errors, backend failures, and silence recovery. The WAV analyzer selects the
+amplitude-4096 diagnostic tone, merges only sub-2-ms resampler crossings and
+checks its observed duration within a five-percent tolerance.
+
+Run `Build.bat test` for component and analyzer selftests. Run
+`Tests/Invoke-QemuWavCapture.ps1` from the workspace for the full Test-image
+capture. Detailed German notes are in `DOCUMENTATION.de.txt`; the system-wide
+procedure is in `Docs/Audio/AudioDiagnostics.txt`.
 
 ## License
 

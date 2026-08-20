@@ -1,25 +1,48 @@
-﻿AUDIOD.R4X
-==========
+AUDIOD.R4X 0.2.0
+================
 
-AUDIOD.R4X ist die Audio- und PCM-Stream-Diagnose.
+AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
+den aktiven Hardwaretreiber. Das Testprofil installiert sie unter
+C:\R4OS\SOFTWARE\TERMINAL\DIAG\AUDIOD.R4X.
 
-Projektstruktur seit 0.51.21:
-- `build.zig` baut die Diagnose als eigenes SDK-Projekt.
-- `build.zig.zon` bindet `r4os_sdk` als Paket.
-- `module.R4MF` beschreibt Artefakt, Zielpfad, R4L-Imports und Contract.
+Standardmodus
+-------------
+Sechzehn 480-Frame-Quanten liefern ein phasenstabiles Rechtecksignal mit
+48.000 Hz, Stereo und Signed-16-Little-Endian. Danach folgen Pakete mit 1,
+239, 17, 310 und 33 Frames. Zusammen sind 8.280 Quellframes zu erwarten.
+Der Test laedt die sechzehn Vollperioden als begrenzten Burst vor und fuellt
+damit den gesamten HDA-Ring. So prueft er Wraparound und Paketgrenzen, ohne
+unter TCG den Gasttimer mit dem QEMU-Audiothread zu vergleichen.
+
+Langmodus
+---------
+AUDIOD /LONG erzeugt 6.000 Quanten beziehungsweise 2.880.000 Frames und damit
+60 Sekunden PCM. Der Test fuellt sechzehn HDA-Perioden vor und legt anhand des
+gemeldeten Backendfuellstands nach. Damit wird der Ring getestet, ohne eine
+Abweichung zwischen QEMU-Audiothread und Gasttimer als Treiberunterlauf zu
+zaehlen.
+
+Auswertung
+----------
+Vor und nach der Wiedergabe werden Service- und Performancezaehler erfasst.
+Die Ergebniszeile trennt upstreamDropped, driverUnderruns, driverErrors,
+backendFail und silencePeriods. Ein Erfolg verlangt fuer alle Werte null sowie
+vollstaendige Write-/Bytezaehler und gueltige Latenzmetriken.
+
+Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
+RIFF-/data-Laengen. Der Auswerter trennt das 4096-Amplituden-Diagnosesignal von
+den vorherigen, leiseren Subsystem-Selbsttests, fasst nur Resamplerflanken bis
+2 ms zusammen und verlangt eine Signaldauer innerhalb von fuenf Prozent der
+8.280 Quellframes. Sampleverlust und insbesondere das alte Muster aus 480
+Nutz- und 544 Nullframes werden ueber getrennte Signalcluster erkannt.
+Tests/Invoke-QemuWavCapture.ps1 startet das Testimage, wartet auf den normalen
+Poweroff, prueft die seriellen Standardmarker und wertet danach die WAV-Datei
+aus.
 
 Build:
 
-    cd Code\System\Diagnostics\AudioDiag
-    ..\..\..\DevTools\Zig\zig.exe build
+    Build.bat test
 
-Ergebnis:
+QEMU-WAV-Abnahme aus dem Workspace:
 
-    Code\System\Diagnostics\AudioDiag\zig-out\AUDIOD.R4X
-
-Contract:
-- Build-Profil: `Zig/R4XStart`
-- R4XStart-Entry: `audiod_main`
-- App-Klasse: `console`
-- R4L-Imports: `R4SYS`, `R4AUDIO`
-- Zielpfad im Image: `C:\R4OS\SOFTWARE\TERMINAL\DIAG\AUDIOD.R4X`
+    powershell -File Tests\Invoke-QemuWavCapture.ps1 -Profile Test

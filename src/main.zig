@@ -14,11 +14,13 @@ const DiagApi = struct {
 pub fn r4_app_main(app: *r4os.App) i32 {
     var ctx = DiagApi.init(app) orelse return r4os.abi.err_no_group;
     const long_mode = containsIgnoreCase(app.args(), "/LONG");
+    var silence: [pattern.quantum_bytes]u8 = .{0} ** pattern.quantum_bytes;
     var pcm: [pattern.quantum_bytes]u8 = undefined;
     var variable_pcm: [pattern.quantum_bytes]u8 = undefined;
 
     ctx.sys.println("AUDIOD");
     const perf_before = ctx.performance.summary() orelse return fail(&ctx, "performance summary before playback");
+    const work_before = ctx.performance.driverWork(0) orelse return fail(&ctx, "driver work before playback");
 
     var status: r4os.abi.AudioServiceStatus = .{};
     const service_ready = waitForAudioService(&ctx, &status);
@@ -34,6 +36,21 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.print("audio_open_stream: ");
     ctx.sys.printU64(stream.stream_id);
     ctx.sys.write("\r\n");
+
+    const silent_written = switch (stream.write(&silence, r4os.time_contract.timeoutForever())) {
+        .written => |bytes| bytes,
+        else => 0,
+    };
+    var status_silent: r4os.abi.AudioServiceStatus = .{};
+    const silent_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutForever(), &status_silent)) {
+        .ok => true,
+        else => false,
+    };
+    const lazy_silence_ok = silent_written == silence.len and silent_status_ok and
+        status_silent.materialized_sessions == service_before.materialized_sessions and
+        status_silent.lazy_open_count == service_before.lazy_open_count and
+        status_silent.silence_write_count > service_before.silence_write_count and
+        status_silent.silence_bytes >= service_before.silence_bytes + silence.len;
     const volume_ok = switch (stream.setVolume(0x00010000, r4os.time_contract.timeoutForever())) {
         .ok => true,
         else => false,
@@ -82,6 +99,22 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         }
     }
 
+    var status_signal: r4os.abi.AudioServiceStatus = .{};
+    const signal_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutForever(), &status_signal)) {
+        .ok => true,
+        else => false,
+    };
+    const signal_materialized_ok = signal_status_ok and write_count > 0 and
+        status_signal.materialized_sessions > service_before.materialized_sessions and
+        status_signal.lazy_open_count > service_before.lazy_open_count and
+        status_signal.last_write_bytes > 0 and
+        status_signal.last_write_bytes <= variable_pcm.len;
+
+    const idle_written = switch (stream.write(&silence, r4os.time_contract.timeoutForever())) {
+        .written => |bytes| bytes,
+        else => 0,
+    };
+
     const closed_ok = switch (stream.close(r4os.time_contract.timeoutForever())) {
         .ok => true,
         else => false,
@@ -93,6 +126,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         else => false,
     };
     const perf_after = ctx.performance.summary() orelse return fail(&ctx, "performance summary after playback");
+    const work_after = ctx.performance.driverWork(0) orelse return fail(&ctx, "driver work after playback");
 
     const upstream_dropped = delta(perf_before.audio_stream_dropped_bytes, perf_after.audio_stream_dropped_bytes);
     const backend_underruns = delta(perf_before.audio_backend_underruns, perf_after.audio_backend_underruns);
@@ -102,10 +136,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
 
     const service_ok = service_status_after_ok and
         status_after.requests > service_before.requests and
-        status_after.stream_write_requests >= service_before.stream_write_requests + write_count and
+        status_after.stream_write_requests >= service_before.stream_write_requests + write_count + 2 and
         status_after.bytes_written >= service_before.bytes_written + expected_bytes and
-        status_after.last_write_bytes > 0 and
-        status_after.last_write_bytes <= variable_pcm.len and
+        status_after.materialized_sessions == service_before.materialized_sessions and
+        status_after.idle_close_count > service_before.idle_close_count and
+        status_after.silence_write_count >= service_before.silence_write_count + 2 and
+        status_after.silence_bytes >= service_before.silence_bytes + silence.len * 2 and
         status_after.request_total_ticks >= service_before.request_total_ticks and
         status_after.request_max_ticks >= status_after.request_last_ticks and
         status_after.write_request_total_ticks >= service_before.write_request_total_ticks and
@@ -115,8 +151,15 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         perf_after.audio_backend_refills > perf_before.audio_backend_refills and
         perf_after.audio_stream_write_total_ticks >= perf_before.audio_stream_write_total_ticks and
         perf_after.audio_backend_write_total_ticks >= perf_before.audio_backend_write_total_ticks;
+    const deadline_ok = work_after.version >= 2 and work_after.deadline_worker_count == 1 and
+        work_after.deadline_worker_started != 0 and
+        work_after.deadline_submitted > work_before.deadline_submitted and
+        work_after.deadline_started > work_before.deadline_started and
+        work_after.deadline_misses == work_before.deadline_misses and
+        work_after.deadline_budget_overruns == work_before.deadline_budget_overruns and
+        work_after.deadline_queue_rejections == work_before.deadline_queue_rejections;
     const path_ok = upstream_dropped == 0 and backend_underruns == 0 and backend_errors == 0 and backend_failures == 0 and silence_periods == 0;
-    const ok = volume_ok and writes_ok and closed_ok and service_ok and performance_ok and path_ok;
+    const ok = lazy_silence_ok and volume_ok and writes_ok and signal_materialized_ok and idle_written == silence.len and closed_ok and service_ok and performance_ok and deadline_ok and path_ok;
 
     ctx.sys.print("AUDIOD pattern: mode=");
     ctx.sys.print(if (long_mode) "long" else "capture");
@@ -128,6 +171,8 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.printU64(expected_bytes);
     ctx.sys.write("\r\n");
     printPathDeltas(&ctx, upstream_dropped, backend_underruns, backend_errors, backend_failures, silence_periods);
+    printIdlePath(&ctx, status_after, service_before);
+    printDeadlinePath(&ctx, work_after, work_before);
     printLatency(&ctx, perf_after);
     printServiceLatency(&ctx, status_after);
     ctx.sys.print("Audio PCM continuity diagnostics: ");
@@ -135,6 +180,32 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.print("AUDIOD result: ");
     ctx.sys.println(if (ok) "OK" else "FAILED");
     return if (ok) 0 else 1;
+}
+
+fn printIdlePath(ctx: *const DiagApi, after: r4os.abi.AudioServiceStatus, before: r4os.abi.AudioServiceStatus) void {
+    ctx.sys.print("AUDIOD idle: lazyOpens=");
+    ctx.sys.printU64(delta(before.lazy_open_count, after.lazy_open_count));
+    ctx.sys.print(" silenceWrites=");
+    ctx.sys.printU64(delta(before.silence_write_count, after.silence_write_count));
+    ctx.sys.print(" silenceBytes=");
+    ctx.sys.printU64(delta(before.silence_bytes, after.silence_bytes));
+    ctx.sys.print(" idleCloses=");
+    ctx.sys.printU64(delta(before.idle_close_count, after.idle_close_count));
+    ctx.sys.write("\r\n");
+}
+
+fn printDeadlinePath(ctx: *const DiagApi, after: r4os.abi.ProgramDriverWorkPerformanceInfo, before: r4os.abi.ProgramDriverWorkPerformanceInfo) void {
+    ctx.sys.print("AUDIOD deadline: submitted=");
+    ctx.sys.printU64(delta(before.deadline_submitted, after.deadline_submitted));
+    ctx.sys.print(" started=");
+    ctx.sys.printU64(delta(before.deadline_started, after.deadline_started));
+    ctx.sys.print(" misses=");
+    ctx.sys.printU64(delta(before.deadline_misses, after.deadline_misses));
+    ctx.sys.print(" overruns=");
+    ctx.sys.printU64(delta(before.deadline_budget_overruns, after.deadline_budget_overruns));
+    ctx.sys.print(" rejected=");
+    ctx.sys.printU64(delta(before.deadline_queue_rejections, after.deadline_queue_rejections));
+    ctx.sys.write("\r\n");
 }
 
 fn waitForAudioService(ctx: *const DiagApi, status: *r4os.abi.AudioServiceStatus) bool {

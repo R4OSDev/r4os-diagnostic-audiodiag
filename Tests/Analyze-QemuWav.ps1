@@ -105,6 +105,79 @@ function Measure-Activity([bool[]]$Active, [int]$SampleRate) {
     }
 }
 
+function Select-DiagnosticActivity([int[]]$Left, [int[]]$Right, [int]$SampleRate) {
+    if ($Left.Length -ne $Right.Length) { throw 'Stereo activity arrays differ in length.' }
+
+    $histogram = [System.Collections.Generic.Dictionary[int, int]]::new()
+    for ($frame = 0; $frame -lt $Left.Length; $frame++) {
+        $leftAbs = [Math]::Abs($Left[$frame])
+        $rightAbs = [Math]::Abs($Right[$frame])
+        $magnitude = [int][Math]::Round(($leftAbs + $rightAbs) / 2.0)
+        $samePolarity = ($Left[$frame] -ge 0) -eq ($Right[$frame] -ge 0)
+        $stereoTolerance = [Math]::Max(4, [int][Math]::Ceiling($magnitude * 0.02))
+        if ($magnitude -lt 256 -or -not $samePolarity -or [Math]::Abs($leftAbs - $rightAbs) -gt $stereoTolerance) { continue }
+        if ($histogram.ContainsKey($magnitude)) { $histogram[$magnitude]++ } else { $histogram[$magnitude] = 1 }
+    }
+
+    $expectedSignalFrames = [int][Math]::Round($SampleRate * ($captureFrames48k / 48000.0))
+    $minimumPlateauFrames = [Math]::Max(64, [int][Math]::Floor($expectedSignalFrames * 0.10))
+    $centers = [System.Collections.Generic.List[int]]::new()
+    $bestResult = $null
+    $bestRank = -1
+    $bestScore = [double]::NegativeInfinity
+    foreach ($entry in @($histogram.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 64)) {
+        if ($entry.Value -lt $minimumPlateauFrames) { continue }
+        $center = [int]$entry.Key
+        $tolerance = [Math]::Max(2, [int][Math]::Ceiling($center * 0.01))
+        $duplicate = $false
+        foreach ($existing in $centers) {
+            if ([Math]::Abs($center - $existing) -le $tolerance) { $duplicate = $true; break }
+        }
+        if ($duplicate) { continue }
+        $centers.Add($center)
+
+        [bool[]]$active = New-Object bool[] $Left.Length
+        for ($frame = 0; $frame -lt $Left.Length; $frame++) {
+            $leftAbs = [Math]::Abs($Left[$frame])
+            $rightAbs = [Math]::Abs($Right[$frame])
+            $magnitude = [int][Math]::Round(($leftAbs + $rightAbs) / 2.0)
+            $samePolarity = ($Left[$frame] -ge 0) -eq ($Right[$frame] -ge 0)
+            $stereoTolerance = [Math]::Max(4, [int][Math]::Ceiling($magnitude * 0.02))
+            $active[$frame] = $samePolarity -and
+                [Math]::Abs($leftAbs - $rightAbs) -le $stereoTolerance -and
+                [Math]::Abs($magnitude - $center) -le $tolerance
+        }
+
+        $result = Measure-Activity $active $SampleRate
+        $result | Add-Member -NotePropertyName CandidateAmplitude -NotePropertyValue $center
+        $accepted = $result.Continuous -and $result.Known480_544Patterns -eq 0
+        $rank = if ($accepted) { 3 } elseif ($result.Known480_544Patterns -gt 0) { 2 } else { 1 }
+        $score = if ($rank -eq 3) {
+            -[Math]::Abs($result.LongestContinuousSpanFrames - $expectedSignalFrames)
+        } elseif ($rank -eq 2) {
+            $result.Known480_544Patterns * 1000000.0 + $result.ActiveFrames
+        } else {
+            -[Math]::Abs($result.LongestContinuousSpanFrames - $expectedSignalFrames)
+        }
+        if ($rank -gt $bestRank -or ($rank -eq $bestRank -and $score -gt $bestScore)) {
+            $bestResult = $result
+            $bestRank = $rank
+            $bestScore = $score
+        }
+    }
+
+    if ($null -eq $bestResult) {
+        [bool[]]$fallback = New-Object bool[] $Left.Length
+        for ($frame = 0; $frame -lt $Left.Length; $frame++) {
+            $fallback[$frame] = [Math]::Abs($Left[$frame]) -gt $diagnosticThreshold -or
+                [Math]::Abs($Right[$frame]) -gt $diagnosticThreshold
+        }
+        $bestResult = Measure-Activity $fallback $SampleRate
+        $bestResult | Add-Member -NotePropertyName CandidateAmplitude -NotePropertyValue 0
+    }
+    return $bestResult
+}
+
 function Read-WavActivity([string]$FilePath) {
     $fullPath = [IO.Path]::GetFullPath($FilePath)
     if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "WAV file not found: $fullPath" }
@@ -150,17 +223,18 @@ function Read-WavActivity([string]$FilePath) {
 
     $frameBytes = $channels * 2
     $frameCount = [int]($dataBytes / $frameBytes)
-    [bool[]]$active = New-Object bool[] $frameCount
+    [int[]]$leftSamples = New-Object int[] $frameCount
+    [int[]]$rightSamples = New-Object int[] $frameCount
     for ($frame = 0; $frame -lt $frameCount; $frame++) {
         $offset = $dataOffset + ($frame * $frameBytes)
-        $left = [Math]::Abs([int](Read-I16 $bytes $offset))
-        $right = if ($channels -eq 2) { [Math]::Abs([int](Read-I16 $bytes ($offset + 2))) } else { $left }
-        # AUDIOD uses amplitude 4096. The subsystem-runtime selftest in the
-        # same image stays at or below 1536, so this selects only the intended
-        # diagnostic tone even when QEMU buffers both sources into one WAV.
-        $active[$frame] = $left -gt $diagnosticThreshold -or $right -gt $diagnosticThreshold
+        $leftSamples[$frame] = [int](Read-I16 $bytes $offset)
+        $rightSamples[$frame] = if ($channels -eq 2) { [int](Read-I16 $bytes ($offset + 2)) } else { $leftSamples[$frame] }
     }
-    return Measure-Activity $active $sampleRate
+    # Boot and subsystem selftests share the capture. Identify AUDIOD by its
+    # stable stereo square-wave plateau and expected duration instead of a
+    # global amplitude threshold; unrelated louder audio must not merge with
+    # the diagnostic span.
+    return Select-DiagnosticActivity $leftSamples $rightSamples $sampleRate
 }
 
 function Assert-Condition([bool]$Condition, [string]$Message) {
@@ -189,7 +263,23 @@ if ($SelfTest) {
     $lossResult = Measure-Activity $loss 48000
     Assert-Condition (-not $lossResult.Continuous) 'Injected sample-loss fixture was accepted.'
 
-    Write-Host 'AUDIOD QEMU WAV analyzer self-test OK: continuous, 480/544 and sample-loss fixtures.'
+    [int[]]$mixedLeft = New-Object int[] 23000
+    [int[]]$mixedRight = New-Object int[] 23000
+    for ($frame = 100; $frame -lt 12100; $frame++) {
+        $sample = if ((($frame / 32) -band 1) -eq 0) { 6000 } else { -6000 }
+        $mixedLeft[$frame] = $sample
+        $mixedRight[$frame] = $sample
+    }
+    for ($frame = 14000; $frame -lt 14000 + $captureFrames48k; $frame++) {
+        $sample = if (((($frame - 14000) / 24) -band 1) -eq 0) { 4096 } else { -4096 }
+        $mixedLeft[$frame] = $sample
+        $mixedRight[$frame] = $sample
+    }
+    $mixedResult = Select-DiagnosticActivity $mixedLeft $mixedRight 48000
+    Assert-Condition $mixedResult.Continuous 'Diagnostic selector was masked by unrelated louder audio.'
+    Assert-Condition ($mixedResult.CandidateAmplitude -eq 4096) 'Diagnostic selector chose the unrelated plateau.'
+
+    Write-Host 'AUDIOD QEMU WAV analyzer self-test OK: continuous, 480/544, sample-loss and mixed-audio fixtures.'
     exit 0
 }
 

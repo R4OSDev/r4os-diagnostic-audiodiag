@@ -32,9 +32,11 @@ mapped local checkouts.
 Default mode emits deterministic 480-frame and variable-size packets for the
 QEMU WAV continuity gate. `/LONG` feeds a 60-second tone against the reported
 backend fill level. The result separates upstream drops, HDA underruns, stream
-errors, backend failures, and silence recovery. The WAV analyzer selects the
-amplitude-4096 diagnostic tone, merges only sub-2-ms resampler crossings and
-checks its observed duration within a five-percent tolerance.
+errors, backend failures, and silence recovery. The WAV analyzer identifies
+the stable stereo diagnostic plateau by shape and expected duration, so louder
+boot or subsystem audio in the same capture cannot mask it. It merges only
+sub-2-ms resampler crossings and checks the observed duration within a
+five-percent tolerance.
 The default run also proves a silent logical stream stays unmaterialized,
 signal lazily opens the backend, later silence closes it once, and the
 DriverApi-v20 audio lane records productive work without a new deadline miss,
@@ -42,7 +44,8 @@ budget overrun, or admission rejection.
 
 Run `Build.bat test` for component and analyzer selftests. Run
 `Tests/Invoke-QemuWavCapture.ps1` from the workspace for the full Test-image
-capture. Detailed German notes are in `DOCUMENTATION.de.txt`; the system-wide
+capture on Windows or Debian Linux. Detailed German notes are in
+`DOCUMENTATION.de.txt`; the system-wide
 procedure is in `Docs/Audio/AudioDiagnostics.txt`.
 
 ## License

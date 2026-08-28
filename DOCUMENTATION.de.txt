@@ -45,14 +45,19 @@ das Wiederladen nach einem Dienstneustart. Der resident gestartete AUDSVC
 enthaelt dadurch keinen separaten Diagnosezweig mehr.
 
 Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
-RIFF-/data-Laengen. Der Auswerter trennt das 4096-Amplituden-Diagnosesignal von
-den vorherigen, leiseren Subsystem-Selbsttests, fasst nur Resamplerflanken bis
-2 ms zusammen und verlangt eine Signaldauer innerhalb von fuenf Prozent der
-8.280 Quellframes. Sampleverlust und insbesondere das alte Muster aus 480
-Nutz- und 544 Nullframes werden ueber getrennte Signalcluster erkannt.
-Tests/Invoke-QemuWavCapture.ps1 startet das Testimage, wartet auf den normalen
-Poweroff, prueft die seriellen Standardmarker und wertet danach die WAV-Datei
-aus.
+RIFF-/data-Laengen. Der Auswerter erkennt das stabile, kanalgleiche AUDIOD-
+Rechteckplateau anhand Amplitude, Form und erwarteter Dauer. Lautere Boot- oder
+Subsystemsignale in derselben WAV duerfen es deshalb nicht mehr zu einem
+falschen Gesamtcluster verbinden. Er fasst nur Resamplerflanken bis 2 ms
+zusammen und verlangt eine Signaldauer innerhalb von fuenf Prozent der 8.280
+Quellframes. Sampleverlust und insbesondere das alte Muster aus 480 Nutz- und
+544 Nullframes werden ueber getrennte Signalcluster erkannt. Der Selbsttest
+enthaelt zusaetzlich eine Mixed-Audio-Probe mit einem laengeren, lauteren
+Fremdsignal.
+Tests/Invoke-QemuWavCapture.ps1 startet das Testimage unter Windows oder Debian
+Linux mit dem jeweils richtigen QEMU-Namen und plattformneutralen Pfadgrenzen,
+wartet auf den normalen Poweroff, prueft die seriellen Standardmarker und
+wertet danach die WAV-Datei aus.
 
 Build:
 
@@ -61,3 +66,4 @@ Build:
 QEMU-WAV-Abnahme aus dem Workspace:
 
     powershell -File Tests\Invoke-QemuWavCapture.ps1 -Profile Test
+    pwsh -NoLogo -NoProfile -File Tests/Invoke-QemuWavCapture.ps1 -Profile Test

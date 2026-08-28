@@ -10,7 +10,12 @@ $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..\..'))
 $profileDirectory = Join-Path $workspace "Artifacts\Distribution\Profiles\$Profile"
 $logsDirectory = Join-Path $workspace 'Artifacts\Distribution\Logs'
-$qemu = Join-Path $workspace 'DevKit\Emulation\QEMU\qemu-system-x86_64.exe'
+$qemuName = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    'qemu-system-x86_64.exe'
+} else {
+    'qemu-system-x86_64'
+}
+$qemu = Join-Path $workspace "DevKit\Emulation\QEMU\$qemuName"
 $config = Join-Path $workspace 'Repositories\Distribution\QEMU\standard.conf'
 $analyzer = Join-Path $PSScriptRoot 'Analyze-QemuWav.ps1'
 $wavPath = Join-Path $logsDirectory 'qemu-audiod-capture.wav'
@@ -26,10 +31,24 @@ function Quote-Argument([string]$Value) {
     return $Value
 }
 
+function Normalize-StartProcessEnvironment {
+    $pathEntries = @([Environment]::GetEnvironmentVariables().GetEnumerator() |
+        Where-Object { [string]$_.Key -ieq 'Path' })
+    if ($pathEntries.Count -le 1) { return }
+    $canonical = @($pathEntries | Where-Object { [string]$_.Key -ceq 'Path' } | Select-Object -First 1)
+    $pathValue = if ($canonical.Count -eq 1) { [string]$canonical[0].Value } else { [string]$pathEntries[0].Value }
+    [Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('Path', $pathValue, 'Process')
+}
+
 function Assert-LogTarget([string]$Path) {
-    $resolvedLogs = [IO.Path]::GetFullPath($logsDirectory).TrimEnd('\') + '\'
+    $resolvedLogs = [IO.Path]::GetFullPath($logsDirectory)
     $resolvedPath = [IO.Path]::GetFullPath($Path)
-    if (-not $resolvedPath.StartsWith($resolvedLogs, [StringComparison]::OrdinalIgnoreCase)) {
+    $relativePath = [IO.Path]::GetRelativePath($resolvedLogs, $resolvedPath)
+    $parentPrefix = '..' + [IO.Path]::DirectorySeparatorChar
+    if ([IO.Path]::IsPathRooted($relativePath) -or
+        $relativePath -eq '..' -or
+        $relativePath.StartsWith($parentPrefix, [StringComparison]::Ordinal)) {
         throw "Capture output escapes the log directory: $resolvedPath"
     }
     return $resolvedPath
@@ -114,7 +133,18 @@ $argumentLine = @(
 ) -join ' '
 
 Write-Host ("AUDIOD QEMU WAV capture: profile=$Profile timeout=${TimeoutSeconds}s")
-$process = Start-Process -FilePath $qemu -ArgumentList $argumentLine -WorkingDirectory $profileDirectory -WindowStyle Hidden -RedirectStandardError $errorPath -PassThru
+Normalize-StartProcessEnvironment
+$startParameters = @{
+    FilePath = $qemu
+    ArgumentList = $argumentLine
+    WorkingDirectory = $profileDirectory
+    RedirectStandardError = $errorPath
+    PassThru = $true
+}
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $startParameters.WindowStyle = 'Hidden'
+}
+$process = Start-Process @startParameters
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 $audioPassed = $false
 $audioFailed = $false

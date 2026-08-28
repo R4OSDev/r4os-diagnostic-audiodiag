@@ -1,4 +1,4 @@
-﻿AUDIOD.R4X 0.2.1
+﻿AUDIOD.R4X 0.2.2
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
@@ -37,6 +37,12 @@ Idle-Zeile belegt genau eine Lazy-Materialisierung, zwei unterdrueckte
 Stillewrites und einen Idle-Close. Die Deadline-Zeile verlangt neue
 Audio-Deadlinearbeit, einen gestarteten dedizierten Worker und null neue
 Deadline-Misses, Budgetueberzuege oder Queue-Rejections.
+
+Seit 0.2.2 prueft AUDIOD anschliessend auch den globalen AUDSVC-Mastervertrag:
+explizites Mute mit erhaltenem Hoerpegel, die gemeinsame Auswirkung auf zwei
+Streams mit getrennten Einzelpegeln, verzögert zusammengefasste Persistenz und
+das Wiederladen nach einem Dienstneustart. Der resident gestartete AUDSVC
+enthaelt dadurch keinen separaten Diagnosezweig mehr.
 
 Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
 RIFF-/data-Laengen. Der Auswerter trennt das 4096-Amplituden-Diagnosesignal von

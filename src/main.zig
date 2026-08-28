@@ -1,5 +1,6 @@
 const r4os = @import("r4os");
 const pattern = @import("pattern.zig");
+const master_persist_wait_ms: u64 = 15_000;
 
 const DiagApi = struct {
     sys: r4os.r4sys.Context,
@@ -159,7 +160,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         work_after.deadline_budget_overruns == work_before.deadline_budget_overruns and
         work_after.deadline_queue_rejections == work_before.deadline_queue_rejections;
     const path_ok = upstream_dropped == 0 and backend_underruns == 0 and backend_errors == 0 and backend_failures == 0 and silence_periods == 0;
-    const ok = lazy_silence_ok and volume_ok and writes_ok and signal_materialized_ok and idle_written == silence.len and closed_ok and service_ok and performance_ok and deadline_ok and path_ok;
+    const continuity_ok = lazy_silence_ok and volume_ok and writes_ok and signal_materialized_ok and idle_written == silence.len and closed_ok and service_ok and performance_ok and deadline_ok and path_ok;
 
     ctx.sys.print("AUDIOD pattern: mode=");
     ctx.sys.print(if (long_mode) "long" else "capture");
@@ -176,10 +177,171 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     printLatency(&ctx, perf_after);
     printServiceLatency(&ctx, status_after);
     ctx.sys.print("Audio PCM continuity diagnostics: ");
-    ctx.sys.println(if (ok) "OK" else "FAILED");
+    ctx.sys.println(if (continuity_ok) "OK" else "FAILED");
+    const master_ok = runMasterContract(&ctx, pcm[0..]);
+    const ok = continuity_ok and master_ok;
     ctx.sys.print("AUDIOD result: ");
     ctx.sys.println(if (ok) "OK" else "FAILED");
     return if (ok) 0 else 1;
+}
+
+fn runMasterContract(ctx: *const DiagApi, pcm: []const u8) bool {
+    var original: r4os.abi.AudioServiceMasterState = .{};
+    if (ctx.sys.audioServiceMasterState(&original) != r4os.abi.service_api_result_ok) return masterFail(ctx, "state");
+    var restore_needed = true;
+    defer {
+        if (restore_needed) {
+            var ignored: r4os.abi.AudioServiceMasterState = .{};
+            _ = restoreMasterState(&ctx.sys, original, &ignored);
+        }
+    }
+
+    var status: r4os.abi.AudioServiceStatus = .{};
+    if (ctx.sys.audioServiceSetMasterVolume(0x0000_8000, &status) != r4os.abi.service_api_result_ok or
+        status.master_volume_fixed != 0x0000_8000)
+        return masterFail(ctx, "volume");
+
+    var request = r4os.abi.AudioServiceMasterRequest{
+        .flags = r4os.abi.audio_master_request_flag_set_muted | r4os.abi.audio_master_request_flag_muted,
+    };
+    var state: r4os.abi.AudioServiceMasterState = .{};
+    if (ctx.sys.audioServiceSetMasterState(&request, &state) != r4os.abi.service_api_result_ok or
+        (state.flags & r4os.abi.audio_master_state_flag_muted) == 0 or state.effective_volume_fixed != 0)
+        return masterFail(ctx, "mute");
+    if (ctx.sys.audioServiceSetMasterVolume(0x0000_6000, &status) != r4os.abi.service_api_result_ok or
+        ctx.sys.audioServiceMasterState(&state) != r4os.abi.service_api_result_ok or
+        (state.flags & r4os.abi.audio_master_state_flag_muted) == 0 or state.selected_volume_fixed != 0x0000_6000)
+        return masterFail(ctx, "legacy-muted");
+    request = .{ .flags = r4os.abi.audio_master_request_flag_set_volume, .fixed_volume = 0x0000_8000 };
+    if (ctx.sys.audioServiceSetMasterState(&request, &state) != r4os.abi.service_api_result_ok or
+        (state.flags & r4os.abi.audio_master_state_flag_muted) != 0 or state.effective_volume_fixed != 0x0000_8000)
+        return masterFail(ctx, "positive-unmute");
+    if (!waitMasterPersisted(&ctx.sys, original.persist_writes, &state, ctx.sys.ticksFromMilliseconds(master_persist_wait_ms))) {
+        ctx.sys.print("AUDIOD master persistence: flags=");
+        ctx.sys.printU64(state.flags);
+        ctx.sys.print(" writes=");
+        ctx.sys.printU64(state.persist_writes);
+        ctx.sys.print(" failures=");
+        ctx.sys.printU64(state.persist_failures);
+        ctx.sys.print(" changes=");
+        ctx.sys.printU64(state.master_changes);
+        ctx.sys.print(" loads=");
+        ctx.sys.printU64(state.config_loads);
+        ctx.sys.println("");
+        return masterFail(ctx, "initial-persist");
+    }
+
+    const first_raw = ctx.sys.audioServiceOpenStream(pattern.sample_rate, pattern.channels, .s16le);
+    if (first_raw < 0) return masterFail(ctx, "stream-a");
+    var first: u32 = @intCast(first_raw);
+    defer {
+        if (first != 0) _ = ctx.sys.audioServiceClose(first);
+    }
+    const second_raw = ctx.sys.audioServiceOpenStream(pattern.sample_rate, pattern.channels, .s16le);
+    if (second_raw < 0) return masterFail(ctx, "stream-b");
+    var second: u32 = @intCast(second_raw);
+    defer {
+        if (second != 0) _ = ctx.sys.audioServiceClose(second);
+    }
+    const sample = pcm[0..@min(pcm.len, 256)];
+    if (ctx.sys.audioServiceSetVolume(first, 0x0001_0000) < 0 or
+        ctx.sys.audioServiceSetVolume(second, 0x0000_8000) < 0 or
+        ctx.sys.audioServiceWrite(first, sample) <= 0 or ctx.sys.audioServiceWrite(second, sample) <= 0)
+        return masterFail(ctx, "streams");
+    if (ctx.sys.audioServiceStatus(&status) != r4os.abi.service_api_result_ok or status.materialized_sessions < 2)
+        return masterFail(ctx, "stream-status");
+    const backend_before = status.backend_ok;
+    request = .{ .flags = r4os.abi.audio_master_request_flag_set_volume, .fixed_volume = 0x0000_7000 };
+    if (ctx.sys.audioServiceSetMasterState(&request, &state) != r4os.abi.service_api_result_ok or
+        ctx.sys.audioServiceStatus(&status) != r4os.abi.service_api_result_ok or status.backend_ok < backend_before + 2)
+        return masterFail(ctx, "fanout");
+    if (ctx.sys.audioServiceClose(first) != 0 or ctx.sys.audioServiceClose(second) != 0) return masterFail(ctx, "stream-close");
+    first = 0;
+    second = 0;
+
+    if (ctx.sys.audioServiceMasterState(&state) != r4os.abi.service_api_result_ok) return masterFail(ctx, "persist-baseline");
+    const writes_before = state.persist_writes;
+    request = .{
+        .flags = r4os.abi.audio_master_request_flag_set_volume | r4os.abi.audio_master_request_flag_set_muted | r4os.abi.audio_master_request_flag_muted,
+        .fixed_volume = 0x0000_5000,
+    };
+    if (ctx.sys.audioServiceSetMasterState(&request, &state) != r4os.abi.service_api_result_ok or
+        !waitMasterPersisted(&ctx.sys, writes_before, &state, ctx.sys.ticksFromMilliseconds(master_persist_wait_ms))) {
+        return masterFail(ctx, "persist");
+    }
+    const persisted_epoch = state.service_epoch;
+
+    var info: r4os.abi.ServiceInfo = .{};
+    const restart = ctx.sys.serviceRestart("AUDSVC", &info);
+    if (restart != r4os.abi.service_api_result_ok and restart != r4os.abi.service_api_result_running)
+        return masterFail(ctx, "restart");
+    if (!waitServiceStatus(&ctx.sys, &status, ctx.sys.ticksFromMilliseconds(5000)) or status.open_sessions != 0)
+        return masterFail(ctx, "restart-status");
+    if (!waitMasterState(&ctx.sys, &state, ctx.sys.ticksFromMilliseconds(5000)) or
+        state.service_epoch == persisted_epoch or state.selected_volume_fixed != 0x0000_5000 or
+        (state.flags & r4os.abi.audio_master_state_flag_muted) == 0 or state.effective_volume_fixed != 0)
+        return masterFail(ctx, "restart-state");
+
+    const restore_writes = state.persist_writes;
+    if (!restoreMasterState(&ctx.sys, original, &state) or
+        !waitMasterPersisted(&ctx.sys, restore_writes, &state, ctx.sys.ticksFromMilliseconds(master_persist_wait_ms)))
+        return masterFail(ctx, "restore");
+    restore_needed = false;
+    ctx.sys.println("AUDIOD master: OK volume+mute streams=2 fanout=common persistence=restart");
+    return true;
+}
+
+fn waitServiceStatus(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceStatus, max_ticks: u64) bool {
+    const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
+    const started = ctx.ticks();
+    while (ctx.ticks() -| started < max_ticks) {
+        if (ctx.audioServiceStatus(out) == r4os.abi.service_api_result_ok) return true;
+        ctx.sleepTicks(poll_ticks);
+    }
+    return false;
+}
+
+fn waitMasterState(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceMasterState, max_ticks: u64) bool {
+    const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
+    const started = ctx.ticks();
+    while (ctx.ticks() -| started < max_ticks) {
+        if (ctx.audioServiceMasterState(out) == r4os.abi.service_api_result_ok) return true;
+        ctx.sleepTicks(poll_ticks);
+    }
+    return false;
+}
+
+fn waitMasterPersisted(ctx: *const r4os.r4sys.Context, baseline_writes: u64, out: *r4os.abi.AudioServiceMasterState, max_ticks: u64) bool {
+    const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
+    const started = ctx.ticks();
+    while (ctx.ticks() -| started < max_ticks) {
+        if (ctx.audioServiceMasterState(out) == r4os.abi.service_api_result_ok and
+            out.persist_writes > baseline_writes and
+            (out.flags & r4os.abi.audio_master_state_flag_persist_pending) == 0)
+            return true;
+        ctx.sleepTicks(poll_ticks);
+    }
+    return false;
+}
+
+fn restoreMasterState(ctx: *const r4os.r4sys.Context, original: r4os.abi.AudioServiceMasterState, out: *r4os.abi.AudioServiceMasterState) bool {
+    var request = r4os.abi.AudioServiceMasterRequest{
+        .flags = r4os.abi.audio_master_request_flag_set_volume,
+        .fixed_volume = original.last_audible_volume_fixed,
+    };
+    if (ctx.audioServiceSetMasterState(&request, out) != r4os.abi.service_api_result_ok) return false;
+    request = .{
+        .flags = r4os.abi.audio_master_request_flag_set_volume | r4os.abi.audio_master_request_flag_set_muted |
+            (if ((original.flags & r4os.abi.audio_master_state_flag_muted) != 0) r4os.abi.audio_master_request_flag_muted else 0),
+        .fixed_volume = original.selected_volume_fixed,
+    };
+    return ctx.audioServiceSetMasterState(&request, out) == r4os.abi.service_api_result_ok;
+}
+
+fn masterFail(ctx: *const DiagApi, stage: []const u8) bool {
+    ctx.sys.print("AUDIOD master: FAILED stage=");
+    ctx.sys.println(stage);
+    return false;
 }
 
 fn printIdlePath(ctx: *const DiagApi, after: r4os.abi.AudioServiceStatus, before: r4os.abi.AudioServiceStatus) void {

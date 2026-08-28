@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.2`
+- Version: `0.2.3`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -41,6 +41,11 @@ The default run also proves a silent logical stream stays unmaterialized,
 signal lazily opens the backend, later silence closes it once, and the
 DriverApi-v20 audio lane records productive work without a new deadline miss,
 budget overrun, or admission rejection.
+It then restarts AUDSVC, replays four bounded partial-period
+Open/Write/Close cycles, proves all logical and materialized sessions return
+to zero, and validates the HDA core/runtime diagnostic records through
+LogService. The serial lifecycle and diagnostic markers are part of the
+existing Test-profile acceptance contract.
 
 Run `Build.bat test` for component and analyzer selftests. Run
 `Tests/Invoke-QemuWavCapture.ps1` from the workspace for the full Test-image

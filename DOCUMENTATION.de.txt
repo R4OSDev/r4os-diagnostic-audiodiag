@@ -1,4 +1,4 @@
-﻿AUDIOD.R4X 0.2.2
+﻿AUDIOD.R4X 0.2.3
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
@@ -12,8 +12,8 @@ AUDSVC muss es konsumieren, ohne einen Backendstream zu materialisieren.
 Danach liefern sechzehn 480-Frame-Quanten ein phasenstabiles Rechtecksignal mit
 48.000 Hz, Stereo und Signed-16-Little-Endian. Danach folgen Pakete mit 1,
 239, 17, 310 und 33 Frames. Zusammen sind 8.280 Quellframes zu erwarten.
-Der Test laedt die sechzehn Vollperioden als begrenzten Burst vor und fuellt
-damit den gesamten HDA-Ring. So prueft er Wraparound und Paketgrenzen, ohne
+Der Test laedt die sechzehn Vollperioden als begrenzten Burst vor und belegt
+damit einen Teil des 64-Perioden-HDA-Rings. So prueft er Paketgrenzen, ohne
 unter TCG den Gasttimer mit dem QEMU-Audiothread zu vergleichen.
 Nach dem Signal schreibt AUDIOD ein zweites stilles Quantum. Es muss den
 materialisierten Backendstream genau einmal schliessen, ohne einen weiteren
@@ -43,6 +43,15 @@ explizites Mute mit erhaltenem Hoerpegel, die gemeinsame Auswirkung auf zwei
 Streams mit getrennten Einzelpegeln, verzögert zusammengefasste Persistenz und
 das Wiederladen nach einem Dienstneustart. Der resident gestartete AUDSVC
 enthaelt dadurch keinen separaten Diagnosezweig mehr.
+
+Seit 0.2.3 folgen nach diesem Neustart vier reale Replay-Zyklen. Jeder Zyklus
+oeffnet einen logischen Stream, schreibt ein nichtstilles 256-Byte-Paket als
+Teilperiode, drainiert und schliesst wieder. Open- und materialisierte
+Sessions muessen danach jeweils auf null zurueckkehren; Drops, Unterlaeufe,
+Backendfehler und stale PCM duerfen nicht entstehen. Anschliessend liest
+AUDIOD ueber LOGSVC die begrenzten HDA-Core- und Runtime-Records und verlangt
+PCI-/Controllerwahl, Transport, Codec/AFG, Route/Pin, Format, IRQ,
+Positionsquelle sowie getrennte Laufzeit-, Recovery- und Timeoutzaehler.
 
 Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
 RIFF-/data-Laengen. Der Auswerter erkennt das stabile, kanalgleiche AUDIOD-

@@ -179,7 +179,9 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.print("Audio PCM continuity diagnostics: ");
     ctx.sys.println(if (continuity_ok) "OK" else "FAILED");
     const master_ok = runMasterContract(&ctx, pcm[0..]);
-    const ok = continuity_ok and master_ok;
+    const lifecycle_ok = if (master_ok) runLifecycleContract(&ctx) else false;
+    const hda_diagnostic_ok = if (lifecycle_ok) waitForHdaDiagnostic(&ctx) else false;
+    const ok = continuity_ok and master_ok and lifecycle_ok and hda_diagnostic_ok;
     ctx.sys.print("AUDIOD result: ");
     ctx.sys.println(if (ok) "OK" else "FAILED");
     return if (ok) 0 else 1;
@@ -289,6 +291,193 @@ fn runMasterContract(ctx: *const DiagApi, pcm: []const u8) bool {
     restore_needed = false;
     ctx.sys.println("AUDIOD master: OK volume+mute streams=2 fanout=common persistence=restart");
     return true;
+}
+
+fn runLifecycleContract(ctx: *const DiagApi) bool {
+    const cycles: usize = 4;
+    var before: r4os.abi.AudioServiceStatus = .{};
+    if (ctx.sys.audioServiceStatus(&before) != r4os.abi.service_api_result_ok or
+        before.open_sessions != 0 or before.materialized_sessions != 0)
+        return lifecycleFail(ctx, "baseline");
+    const perf_before = ctx.performance.summary() orelse return lifecycleFail(ctx, "performance-before");
+
+    // Keep the direct R4SYS request including its header below the service
+    // message bound. A partial hardware period also exercises tail drain.
+    var sample: [256]u8 = undefined;
+    var cycle: usize = 0;
+    while (cycle < cycles) : (cycle += 1) {
+        pattern.fillSquare(&sample, @as(u64, @intCast(cycle * pattern.quantum_frames)));
+        const raw = ctx.sys.audioServiceOpenStream(pattern.sample_rate, pattern.channels, .s16le);
+        if (raw < 0) return lifecycleFail(ctx, "open");
+        const stream_id: u32 = @intCast(raw);
+        var close_needed = true;
+        defer {
+            if (close_needed) _ = ctx.sys.audioServiceClose(stream_id);
+        }
+
+        if (ctx.sys.audioServiceSetVolume(stream_id, 0x0001_0000) < 0 or
+            !writeLifecycleSample(ctx, stream_id, sample[0..]))
+            return lifecycleFail(ctx, "write");
+
+        var active: r4os.abi.AudioServiceStatus = .{};
+        if (ctx.sys.audioServiceStatus(&active) != r4os.abi.service_api_result_ok or
+            active.open_sessions != before.open_sessions + 1 or
+            active.materialized_sessions != before.materialized_sessions + 1 or
+            active.last_write_bytes != sample.len)
+            return lifecycleFail(ctx, "active-state");
+
+        if (ctx.sys.audioServiceClose(stream_id) != r4os.abi.service_api_result_ok) return lifecycleFail(ctx, "close");
+        close_needed = false;
+        var closed: r4os.abi.AudioServiceStatus = .{};
+        if (ctx.sys.audioServiceStatus(&closed) != r4os.abi.service_api_result_ok or
+            closed.open_sessions != before.open_sessions or
+            closed.materialized_sessions != before.materialized_sessions or
+            closed.backend_fail != before.backend_fail)
+            return lifecycleFail(ctx, "closed-state");
+    }
+
+    var after: r4os.abi.AudioServiceStatus = .{};
+    if (ctx.sys.audioServiceStatus(&after) != r4os.abi.service_api_result_ok or
+        after.stream_open_requests < before.stream_open_requests + @as(u64, cycles) or
+        after.stream_write_requests < before.stream_write_requests + @as(u64, cycles) or
+        after.stream_close_requests < before.stream_close_requests + @as(u64, cycles) or
+        after.open_sessions != 0 or after.materialized_sessions != 0)
+        return lifecycleFail(ctx, "counters");
+    const perf_after = ctx.performance.summary() orelse return lifecycleFail(ctx, "performance-after");
+    if (perf_after.audio_stream_dropped_bytes != perf_before.audio_stream_dropped_bytes or
+        perf_after.audio_backend_underruns != perf_before.audio_backend_underruns or
+        perf_after.audio_backend_errors != perf_before.audio_backend_errors or
+        perf_after.audio_backend_fail != perf_before.audio_backend_fail)
+        return lifecycleFail(ctx, "backend-path");
+
+    ctx.sys.println("AUDIOD lifecycle: OK cycles=4 restart=replay multi=2 stale=none");
+    return true;
+}
+
+fn lifecycleFail(ctx: *const DiagApi, stage: []const u8) bool {
+    ctx.sys.print("AUDIOD lifecycle: FAILED stage=");
+    ctx.sys.println(stage);
+    return false;
+}
+
+fn writeLifecycleSample(ctx: *const DiagApi, stream_id: u32, sample: []const u8) bool {
+    const started = ctx.sys.ticks();
+    const max_ticks = ctx.sys.ticksFromMilliseconds(5000);
+    const poll_ticks = @max(ctx.sys.ticksFromMilliseconds(10), 1);
+    while (ctx.sys.ticks() -| started < max_ticks) {
+        const result = ctx.sys.audioServiceWrite(stream_id, sample);
+        if (result == @as(i32, @intCast(sample.len))) return true;
+        if (result != r4os.abi.service_api_result_busy) {
+            ctx.sys.print("AUDIOD lifecycle write result=");
+            printSigned(ctx, result);
+            ctx.sys.write("\r\n");
+            printHdaRecord(ctx, "HDA.DIAG write-reject");
+            return false;
+        }
+        ctx.sys.sleepTicks(poll_ticks);
+    }
+    ctx.sys.println("AUDIOD lifecycle write result=busy-timeout");
+    return false;
+}
+
+fn printSigned(ctx: *const DiagApi, value: i32) void {
+    if (value < 0) {
+        ctx.sys.print("-");
+        const wide: i64 = value;
+        ctx.sys.printU64(@intCast(-wide));
+    } else {
+        ctx.sys.printU64(@intCast(value));
+    }
+}
+
+fn printHdaRecord(ctx: *const DiagApi, search: []const u8) void {
+    var query = r4os.abi.LogServiceRecordQuery{
+        .source_id = r4os.abi.log_service_source_driver,
+        .severity_min = r4os.abi.log_severity_debug,
+    };
+    copyFixedZ(query.search[0..], search);
+    const started = ctx.sys.ticks();
+    const max_ticks = ctx.sys.ticksFromMilliseconds(1000);
+    while (ctx.sys.ticks() -| started < max_ticks) {
+        var page = r4os.abi.LogServiceRecordPage{};
+        if (ctx.sys.logServiceRecords(&query, &page) == r4os.abi.service_api_result_ok and page.count != 0) {
+            const record = &page.records[page.count - 1];
+            const text_len = @min(@as(usize, record.text_len), record.text.len);
+            ctx.sys.print("AUDIOD driver record: ");
+            ctx.sys.write(record.text[0..text_len]);
+            ctx.sys.write("\r\n");
+            return;
+        }
+        ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(50), 1));
+    }
+    ctx.sys.println("AUDIOD driver record: missing");
+}
+
+fn waitForHdaDiagnostic(ctx: *const DiagApi) bool {
+    const core_fields = [_][]const u8{
+        "stage=ready", " pci=", " id=", " gcap=", " str=", " tr=", " codec=", " afg=", " route=", " pin=", " fmt=",
+    };
+    const runtime_fields = [_][]const u8{
+        "phase=close", " irq=", " pos=", " wr=", " und=", " fifo=", " dese=", " prec=", " rec=", " to=", " drain=", " wdrop=", " own=",
+    };
+    const poll_ticks = @max(ctx.sys.ticksFromMilliseconds(100), 1);
+    const started = ctx.sys.ticks();
+    const max_ticks = ctx.sys.ticksFromMilliseconds(5000);
+    var core_ok = false;
+    var runtime_ok = false;
+    while (ctx.sys.ticks() -| started < max_ticks) {
+        if (!core_ok) core_ok = hdaRecordHasFields(&ctx.sys, "HDA.DIAG core", core_fields[0..]);
+        if (!runtime_ok) runtime_ok = hdaRecordHasFields(&ctx.sys, "HDA.DIAG run phase=close", runtime_fields[0..]);
+        if (core_ok and runtime_ok) {
+            ctx.sys.println("AUDIOD HDA diagnostic: OK core=selection+transport+route+format runtime=irq+position counters=separate");
+            return true;
+        }
+        ctx.sys.sleepTicks(poll_ticks);
+    }
+    ctx.sys.print("AUDIOD HDA diagnostic: FAILED core=");
+    ctx.sys.print(if (core_ok) "ok" else "missing");
+    ctx.sys.print(" runtime=");
+    ctx.sys.println(if (runtime_ok) "ok" else "missing");
+    return false;
+}
+
+fn hdaRecordHasFields(ctx: *const r4os.r4sys.Context, search: []const u8, fields: []const []const u8) bool {
+    var query = r4os.abi.LogServiceRecordQuery{
+        .source_id = r4os.abi.log_service_source_driver,
+        .severity_min = r4os.abi.log_severity_debug,
+    };
+    copyFixedZ(query.search[0..], search);
+    var page = r4os.abi.LogServiceRecordPage{};
+    if (ctx.logServiceRecords(&query, &page) != r4os.abi.service_api_result_ok) return false;
+    var record_index: usize = 0;
+    while (record_index < page.count) : (record_index += 1) {
+        const record = &page.records[record_index];
+        const text_len = @min(@as(usize, record.text_len), record.text.len);
+        const text = record.text[0..text_len];
+        var field_index: usize = 0;
+        while (field_index < fields.len and containsText(text, fields[field_index])) : (field_index += 1) {}
+        if (field_index == fields.len) return true;
+    }
+    return false;
+}
+
+fn copyFixedZ(target: []u8, value: []const u8) void {
+    @memset(target, 0);
+    if (target.len == 0) return;
+    const count = @min(target.len - 1, value.len);
+    @memcpy(target[0..count], value[0..count]);
+}
+
+fn containsText(value: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (value.len < needle.len) return false;
+    var offset: usize = 0;
+    while (offset + needle.len <= value.len) : (offset += 1) {
+        var index: usize = 0;
+        while (index < needle.len and value[offset + index] == needle[index]) : (index += 1) {}
+        if (index == needle.len) return true;
+    }
+    return false;
 }
 
 fn waitServiceStatus(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceStatus, max_ticks: u64) bool {

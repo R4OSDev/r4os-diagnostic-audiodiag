@@ -1,4 +1,4 @@
-﻿AUDIOD.R4X 0.2.4
+﻿AUDIOD.R4X 0.2.5
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
@@ -60,6 +60,15 @@ nicht vollstaendig schreibbarer Evidenz scheitert der gesamte Lauf. Dadurch
 ist die Realhardwareabnahme weder von nicht unterstuetzter R4X-Redirection
 noch von einem spaeter gestarteten GUI-Exporter und dessen begrenztem
 Logfenster abhaengig.
+
+Seit 0.2.5 muss jeder kompakte HDA-Runtime-Record zusaetzlich die
+Positionsquellenabweichungen (`pmis`) und Positionsfallbacks (`pfb`) tragen.
+Damit kann ein physischer `lpib-fallback` von einem weiterhin aktiven
+`dma+lpib`-Pfad unterschieden werden; ein eingerichteter DMA-Puffer allein
+gilt nicht mehr faelschlich als tatsaechlich verwendete Positionsquelle.
+Die finale Lenovo-Abnahme bestaetigte dies kalt und warm mit jeweils sechs
+vollstaendigen Runtime-Gruppen, `pmis=3`, `pfb=3`, fortschreitenden Writes und
+saemtlichen Stream-, Recovery-, Timeout- und Workfehlerzaehlern bei null.
 
 Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
 RIFF-/data-Laengen. Der Auswerter erkennt das stabile, kanalgleiche AUDIOD-

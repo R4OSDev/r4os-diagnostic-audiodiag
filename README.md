@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.4`
+- Version: `0.2.5`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -46,6 +46,12 @@ Open/Write/Close cycles, proves all logical and materialized sessions return
 to zero, and validates the HDA core/runtime diagnostic records through
 LogService. The serial lifecycle and diagnostic markers are part of the
 existing Test-profile acceptance contract.
+The runtime record must also expose position-source mismatch and fallback
+counters, so physical LPIB fallback cannot be mislabeled as active DMA merely
+because a DMA position buffer was configured.
+The final cold and warm Lenovo acceptance produced six complete runtime groups
+per boot with `pos=lpib-fallback pmis=3 pfb=3`, advancing writes and every
+stream, recovery, timeout and work-drop counter at zero.
 
 For physical evidence, `/OUT=<path>` atomically exports the still-current HDA
 driver records before AUDIOD exits. The run fails unless candidate decisions,

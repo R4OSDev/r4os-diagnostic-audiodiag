@@ -433,7 +433,7 @@ fn waitForHdaDiagnostic(ctx: *const DiagApi) bool {
         "stage=ready", " pci=", " id=", " gcap=", " str=", " tr=", " codec=", " afg=", " route=", " pin=", " fmt=",
     };
     const runtime_fields = [_][]const u8{
-        "phase=close", " irq=", " pos=", " wr=", " und=", " fifo=", " dese=", " prec=", " rec=", " to=", " drain=", " wdrop=", " own=",
+        "phase=close", " irq=", " pos=", " pmis=", " pfb=", " wr=", " und=", " fifo=", " dese=", " prec=", " rec=", " to=", " drain=", " wdrop=", " own=",
     };
     const poll_ticks = @max(ctx.sys.ticksFromMilliseconds(100), 1);
     const started = ctx.sys.ticks();

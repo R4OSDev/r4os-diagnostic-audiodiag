@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.3`
+- Version: `0.2.4`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -46,6 +46,12 @@ Open/Write/Close cycles, proves all logical and materialized sessions return
 to zero, and validates the HDA core/runtime diagnostic records through
 LogService. The serial lifecycle and diagnostic markers are part of the
 existing Test-profile acceptance contract.
+
+For physical evidence, `/OUT=<path>` atomically exports the still-current HDA
+driver records before AUDIOD exits. The run fails unless candidate decisions,
+the selected controller, the compact core record and a close-runtime record
+are all present. This avoids relying on unsupported external redirection or a
+later GUI export after the bounded log window has advanced.
 
 Run `Build.bat test` for component and analyzer selftests. Run
 `Tests/Invoke-QemuWavCapture.ps1` from the workspace for the full Test-image

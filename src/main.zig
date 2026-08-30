@@ -1,6 +1,7 @@
 const r4os = @import("r4os");
 const pattern = @import("pattern.zig");
 const master_persist_wait_ms: u64 = 15_000;
+const evidence_path_capacity: usize = 128;
 
 const DiagApi = struct {
     sys: r4os.r4sys.Context,
@@ -14,7 +15,16 @@ const DiagApi = struct {
 
 pub fn r4_app_main(app: *r4os.App) i32 {
     var ctx = DiagApi.init(app) orelse return r4os.abi.err_no_group;
-    const long_mode = containsIgnoreCase(app.args(), "/LONG");
+    const args = app.args();
+    const long_mode = containsIgnoreCase(args, "/LONG");
+    var evidence_path: [evidence_path_capacity:0]u8 = .{0} ** evidence_path_capacity;
+    const evidence_requested = argumentSpecified(args, "OUT");
+    const evidence_path_value = argumentValue(args, "OUT");
+    if (evidence_requested and evidence_path_value == null) {
+        ctx.sys.println("AUDIOD option: FAILED /OUT requires a non-empty path shorter than 128 bytes without spaces");
+        return 2;
+    }
+    if (evidence_path_value) |value| copyFixedZ(evidence_path[0..], value);
     var silence: [pattern.quantum_bytes]u8 = .{0} ** pattern.quantum_bytes;
     var pcm: [pattern.quantum_bytes]u8 = undefined;
     var variable_pcm: [pattern.quantum_bytes]u8 = undefined;
@@ -181,7 +191,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     const master_ok = runMasterContract(&ctx, pcm[0..]);
     const lifecycle_ok = if (master_ok) runLifecycleContract(&ctx) else false;
     const hda_diagnostic_ok = if (lifecycle_ok) waitForHdaDiagnostic(&ctx) else false;
-    const ok = continuity_ok and master_ok and lifecycle_ok and hda_diagnostic_ok;
+    const evidence_ok = if (evidence_path_value != null and hda_diagnostic_ok)
+        exportHdaEvidence(&ctx, @ptrCast(&evidence_path), evidence_path_value.?)
+    else
+        evidence_path_value == null;
+    if (evidence_path_value != null and !hda_diagnostic_ok) ctx.sys.println("AUDIOD HDA evidence: FAILED diagnostic-unavailable");
+    const ok = continuity_ok and master_ok and lifecycle_ok and hda_diagnostic_ok and evidence_ok;
     ctx.sys.print("AUDIOD result: ");
     ctx.sys.println(if (ok) "OK" else "FAILED");
     return if (ok) 0 else 1;
@@ -459,6 +474,126 @@ fn hdaRecordHasFields(ctx: *const r4os.r4sys.Context, search: []const u8, fields
         if (field_index == fields.len) return true;
     }
     return false;
+}
+
+fn exportHdaEvidence(ctx: *const DiagApi, path: [*:0]const u8, path_text: []const u8) bool {
+    const candidate_count = hdaRecordCount(&ctx.sys, "HDA.R4D controller candidate") orelse 0;
+    const selected_count = hdaRecordCount(&ctx.sys, "HDA.R4D selected controller") orelse 0;
+    const core_count = hdaRecordCount(&ctx.sys, "HDA.DIAG core") orelse 0;
+    const runtime_count = hdaRecordCount(&ctx.sys, "HDA.DIAG run phase=close") orelse 0;
+    if (candidate_count == 0 or selected_count == 0 or core_count == 0 or runtime_count == 0) {
+        ctx.sys.print("AUDIOD HDA evidence: FAILED candidates=");
+        ctx.sys.printU64(candidate_count);
+        ctx.sys.print(" selected=");
+        ctx.sys.printU64(selected_count);
+        ctx.sys.print(" core=");
+        ctx.sys.printU64(core_count);
+        ctx.sys.print(" runtime=");
+        ctx.sys.printU64(runtime_count);
+        ctx.sys.println("");
+        return false;
+    }
+
+    var query = r4os.abi.LogServiceRecordQuery{
+        .source_id = r4os.abi.log_service_source_driver,
+        .severity_min = r4os.abi.log_severity_debug,
+    };
+    copyFixedZ(query.search[0..], "HDA");
+    _ = ctx.sys.fileDelete(path);
+    var first = true;
+    var pages: usize = 0;
+    var total_bytes: usize = 0;
+    while (pages < 64) : (pages += 1) {
+        var page = r4os.abi.LogServiceExportPage{};
+        if (ctx.sys.logServiceExport(&query, &page) != r4os.abi.service_api_result_ok) return hdaExportFail(ctx, "query");
+        const len = @min(@as(usize, page.bytes), page.text.len);
+        if (len != 0) {
+            const written = if (first) ctx.sys.fileWrite(path, page.text[0..len]) else ctx.sys.fileAppend(path, page.text[0..len]);
+            if (written != @as(i32, @intCast(len))) return hdaExportFail(ctx, "write");
+            first = false;
+            total_bytes += len;
+        }
+        if ((page.flags & r4os.abi.log_service_page_flag_more) == 0) break;
+        if (page.next_index <= query.start_index) return hdaExportFail(ctx, "pagination");
+        query.start_index = page.next_index;
+    }
+    if (first or pages >= 64) return hdaExportFail(ctx, if (first) "empty" else "page-limit");
+
+    ctx.sys.print("AUDIOD HDA evidence: OK candidates=");
+    ctx.sys.printU64(candidate_count);
+    ctx.sys.print(" selected=");
+    ctx.sys.printU64(selected_count);
+    ctx.sys.print(" core=");
+    ctx.sys.printU64(core_count);
+    ctx.sys.print(" runtime=");
+    ctx.sys.printU64(runtime_count);
+    ctx.sys.print(" bytes=");
+    ctx.sys.printU64(total_bytes);
+    ctx.sys.print(" path=");
+    ctx.sys.println(path_text);
+    return true;
+}
+
+fn hdaRecordCount(ctx: *const r4os.r4sys.Context, search: []const u8) ?u32 {
+    var query = r4os.abi.LogServiceRecordQuery{
+        .source_id = r4os.abi.log_service_source_driver,
+        .severity_min = r4os.abi.log_severity_debug,
+    };
+    copyFixedZ(query.search[0..], search);
+    var page = r4os.abi.LogServiceRecordPage{};
+    if (ctx.logServiceRecords(&query, &page) != r4os.abi.service_api_result_ok) return null;
+    return page.total_matches;
+}
+
+fn hdaExportFail(ctx: *const DiagApi, stage: []const u8) bool {
+    ctx.sys.print("AUDIOD HDA evidence: FAILED stage=");
+    ctx.sys.println(stage);
+    return false;
+}
+
+fn argumentValue(args: []const u8, name: []const u8) ?[]const u8 {
+    var rest = trimSpaces(args);
+    while (rest.len != 0) {
+        var end: usize = 0;
+        while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') : (end += 1) {}
+        var token = rest[0..end];
+        if (token.len != 0 and (token[0] == '/' or token[0] == '-')) token = token[1..];
+        if (token.len > name.len and token[name.len] == '=' and sameIgnoreCase(token[0..name.len], name)) {
+            const value = token[name.len + 1 ..];
+            if (value.len != 0 and value.len < evidence_path_capacity) return value;
+            return null;
+        }
+        rest = trimSpaces(rest[end..]);
+    }
+    return null;
+}
+
+fn argumentSpecified(args: []const u8, name: []const u8) bool {
+    var rest = trimSpaces(args);
+    while (rest.len != 0) {
+        var end: usize = 0;
+        while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') : (end += 1) {}
+        var token = rest[0..end];
+        if (token.len != 0 and (token[0] == '/' or token[0] == '-')) token = token[1..];
+        if (token.len >= name.len and sameIgnoreCase(token[0..name.len], name) and
+            (token.len == name.len or token[name.len] == '=')) return true;
+        rest = trimSpaces(rest[end..]);
+    }
+    return false;
+}
+
+fn trimSpaces(value: []const u8) []const u8 {
+    var start: usize = 0;
+    var end = value.len;
+    while (start < end and (value[start] == ' ' or value[start] == '\t')) : (start += 1) {}
+    while (end > start and (value[end - 1] == ' ' or value[end - 1] == '\t')) : (end -= 1) {}
+    return value[start..end];
+}
+
+fn sameIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |left, right| if (upper(left) != upper(right)) return false;
+    return true;
 }
 
 fn copyFixedZ(target: []u8, value: []const u8) void {

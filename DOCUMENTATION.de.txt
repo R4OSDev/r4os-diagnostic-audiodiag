@@ -1,4 +1,4 @@
-﻿AUDIOD.R4X 0.2.3
+﻿AUDIOD.R4X 0.2.4
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
@@ -52,6 +52,14 @@ Backendfehler und stale PCM duerfen nicht entstehen. Anschliessend liest
 AUDIOD ueber LOGSVC die begrenzten HDA-Core- und Runtime-Records und verlangt
 PCI-/Controllerwahl, Transport, Codec/AFG, Route/Pin, Format, IRQ,
 Positionsquelle sowie getrennte Laufzeit-, Recovery- und Timeoutzaehler.
+
+Seit 0.2.4 exportiert `/OUT=<Pfad>` die in diesem Moment noch gueltigen
+HDA-Treiberrecords direkt aus AUDIOD. Kandidatenzeilen, ausgewaehlter
+Controller, Core- und Close-Runtime-Record sind Pflicht; bei fehlender oder
+nicht vollstaendig schreibbarer Evidenz scheitert der gesamte Lauf. Dadurch
+ist die Realhardwareabnahme weder von nicht unterstuetzter R4X-Redirection
+noch von einem spaeter gestarteten GUI-Exporter und dessen begrenztem
+Logfenster abhaengig.
 
 Tests/Analyze-QemuWav.ps1 versteht auch QEMUs Streaming-WAV mit null gesetzten
 RIFF-/data-Laengen. Der Auswerter erkennt das stabile, kanalgleiche AUDIOD-

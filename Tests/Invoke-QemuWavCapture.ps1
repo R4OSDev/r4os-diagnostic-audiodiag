@@ -3,7 +3,10 @@ param(
     [ValidateSet('Test', 'Full')]
     [string]$Profile = 'Test',
 
-    [int]$TimeoutSeconds = 240
+    [ValidateSet(1, 4)]
+    [int]$CpuCount = 1,
+
+    [int]$TimeoutSeconds = 360
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,9 +22,20 @@ $qemu = Join-Path $workspace "DevKit\Emulation\QEMU\$qemuName"
 $config = Join-Path $workspace 'Repositories\Distribution\QEMU\standard.conf'
 $analyzer = Join-Path $PSScriptRoot 'Analyze-QemuWav.ps1'
 $r4gbAnalyzer = Join-Path $workspace 'Repositories\Subsystems\R4GB\Tests\Analyze-QemuApuWav.ps1'
-$wavPath = Join-Path $logsDirectory 'qemu-audiod-capture.wav'
-$logPath = Join-Path $logsDirectory 'qemu-audiod-capture.log'
-$errorPath = Join-Path $logsDirectory 'qemu-audiod-capture.err'
+$wavPath = Join-Path $logsDirectory "qemu-audiod-capture-smp$CpuCount.wav"
+$logPath = Join-Path $logsDirectory "qemu-audiod-capture-smp$CpuCount.log"
+$errorPath = Join-Path $logsDirectory "qemu-audiod-capture-smp$CpuCount.err"
+$kvmAvailable = $IsLinux -and (Test-Path -LiteralPath '/dev/kvm')
+$accelerators = if ($kvmAvailable) {
+    'kvm:tcg'
+} elseif ($IsWindows) {
+    'whpx:tcg'
+} elseif ($IsMacOS) {
+    'hvf:tcg'
+} else {
+    'tcg'
+}
+$cpuModel = if ($kvmAvailable) { 'host' } else { 'Haswell' }
 
 function Assert-File([string]$Path, [string]$Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label not found: $Path" }
@@ -121,9 +135,10 @@ foreach ($target in @($wavPath, $logPath, $errorPath)) {
 $qmpPort = Get-FreeTcpPort
 $argumentLine = @(
     '-readconfig', (Quote-Argument $config),
-    '-cpu', 'Haswell',
+    '-cpu', $cpuModel,
     '-m', '1G',
-    '-smp', '1',
+    '-smp', "$CpuCount",
+    '-machine', (Quote-Argument ('accel=' + $accelerators)),
     '-nic', 'none',
     '-serial', (Quote-Argument ('file:' + $logPath)),
     '-display', 'none',
@@ -134,7 +149,7 @@ $argumentLine = @(
     '-name', (Quote-Argument 'R4OS AUDIOD WAV capture')
 ) -join ' '
 
-Write-Host ("AUDIOD QEMU WAV capture: profile=$Profile timeout=${TimeoutSeconds}s")
+Write-Host ("AUDIOD QEMU WAV capture: profile=$Profile cpus=$CpuCount timeout=${TimeoutSeconds}s")
 Normalize-StartProcessEnvironment
 $startParameters = @{
     FilePath = $qemu
@@ -155,12 +170,15 @@ while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
         $log = Read-SharedText $logPath
         $audioFailed = $log.Contains('Audio PCM continuity diagnostics: FAILED') -or
             $log.Contains('AUDIOD result: FAILED') -or
-            $log.Contains('R4GB APU runtime: FAILED')
+            $log.Contains('R4GB APU runtime: FAILED') -or
+            $log.Contains('R4GB E2E runtime: FAILED') -or
+            $log.Contains('SUBSYSTEM runtime bootstrap FAILED')
         $audioPassed = $log.Contains('HDA.R4D [active]') -and
             $log.Contains('AUDIOD path: upstreamDropped=0 driverUnderruns=0 driverErrors=0 backendFail=0 silencePeriods=0') -and
             $log.Contains('Audio PCM continuity diagnostics: OK') -and
             $log.Contains('AUDIOD result: OK') -and
-            $log.Contains('R4GB APU runtime: OK rate=48000 channels=2 frames=6000 submitted=24000 drift=0 drops=0')
+            $log.Contains('R4GB APU runtime: OK rate=48000 channels=2 frames=6000 submitted=24000 drift=0 drops=0') -and
+            $log.Contains('R4GB long-run E2E: OK duration=60s instances=2 focus=alternating lifecycle=pause+resume+reset+mute endings=witness+close desktop=responsive')
     }
     if ($audioPassed -or $audioFailed) { break }
     Start-Sleep -Milliseconds 100
@@ -176,11 +194,9 @@ if (-not $audioPassed) {
     throw "Audio WAV capture did not reach its AUDIOD and R4GB success markers after $TimeoutSeconds seconds."
 }
 
-# The R4GB success marker is emitted only after its App-Audio stream closed.
-# QEMU's real-time audio thread can still have roughly half a second of audio
-# produced by launcher selftests ahead of the diagnostic stream. Give that
-# host queue a bounded two-second flush window, then terminate the capture.
-Start-Sleep -Milliseconds 2000
+# The long-run marker is emitted only after both productive R4GB streams have
+# closed. Give QEMU's real-time WAV backend one bounded queue flush interval.
+Start-Sleep -Milliseconds 1000
 Stop-QemuThroughQmp $qmpPort
 if (-not $process.WaitForExit(10000)) {
     $process.Kill()
@@ -194,5 +210,5 @@ if ($null -ne $exitCode -and $exitCode -ne 0) { throw "QEMU WAV capture exited w
 
 & $analyzer -Path $wavPath -Expected Continuous
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $r4gbAnalyzer -Path $wavPath
+& $r4gbAnalyzer -Path $wavPath -ExpectedFrames (60 * 48000) -DurationTolerancePercent 5
 exit $LASTEXITCODE

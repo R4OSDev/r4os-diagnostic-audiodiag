@@ -18,6 +18,7 @@ $qemuName = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
 $qemu = Join-Path $workspace "DevKit\Emulation\QEMU\$qemuName"
 $config = Join-Path $workspace 'Repositories\Distribution\QEMU\standard.conf'
 $analyzer = Join-Path $PSScriptRoot 'Analyze-QemuWav.ps1'
+$r4gbAnalyzer = Join-Path $workspace 'Repositories\Subsystems\R4GB\Tests\Analyze-QemuApuWav.ps1'
 $wavPath = Join-Path $logsDirectory 'qemu-audiod-capture.wav'
 $logPath = Join-Path $logsDirectory 'qemu-audiod-capture.log'
 $errorPath = Join-Path $logsDirectory 'qemu-audiod-capture.err'
@@ -104,6 +105,7 @@ Assert-File $config 'QEMU configuration'
 Assert-File (Join-Path $profileDirectory 'disk.img') 'Profile disk image'
 Assert-File (Join-Path $profileDirectory 'data.img') 'Profile data image'
 Assert-File $analyzer 'WAV analyzer'
+Assert-File $r4gbAnalyzer 'R4GB WAV analyzer'
 if ($TimeoutSeconds -le 0) { throw 'TimeoutSeconds must be positive.' }
 if (-not (Test-Path -LiteralPath $logsDirectory -PathType Container)) {
     New-Item -ItemType Directory -Path $logsDirectory -Force | Out-Null
@@ -151,11 +153,14 @@ $audioFailed = $false
 while ([DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
     if (Test-Path -LiteralPath $logPath -PathType Leaf) {
         $log = Read-SharedText $logPath
-        $audioFailed = $log.Contains('Audio PCM continuity diagnostics: FAILED') -or $log.Contains('AUDIOD result: FAILED')
+        $audioFailed = $log.Contains('Audio PCM continuity diagnostics: FAILED') -or
+            $log.Contains('AUDIOD result: FAILED') -or
+            $log.Contains('R4GB APU runtime: FAILED')
         $audioPassed = $log.Contains('HDA.R4D [active]') -and
             $log.Contains('AUDIOD path: upstreamDropped=0 driverUnderruns=0 driverErrors=0 backendFail=0 silencePeriods=0') -and
             $log.Contains('Audio PCM continuity diagnostics: OK') -and
-            $log.Contains('AUDIOD result: OK')
+            $log.Contains('AUDIOD result: OK') -and
+            $log.Contains('R4GB APU runtime: OK rate=48000 channels=2 frames=6000 submitted=24000 drift=0 drops=0')
     }
     if ($audioPassed -or $audioFailed) { break }
     Start-Sleep -Milliseconds 100
@@ -166,12 +171,12 @@ if (-not $audioPassed) {
         $process.Kill()
         $process.WaitForExit(5000) | Out-Null
     }
-    if ($audioFailed) { throw 'AUDIOD reported a failed PCM path during WAV capture.' }
+    if ($audioFailed) { throw 'The audio diagnostics reported a failed PCM path during WAV capture.' }
     if (-not $process.HasExited) { throw "AUDIOD WAV capture timed out after $TimeoutSeconds seconds." }
-    throw "AUDIOD WAV capture did not reach its success markers after $TimeoutSeconds seconds."
+    throw "Audio WAV capture did not reach its AUDIOD and R4GB success markers after $TimeoutSeconds seconds."
 }
 
-# The stream-close marker is emitted only after the HDA ring was drained.
+# The R4GB success marker is emitted only after its App-Audio stream closed.
 # QEMU's real-time audio thread can still have roughly half a second of audio
 # produced by launcher selftests ahead of the diagnostic stream. Give that
 # host queue a bounded two-second flush window, then terminate the capture.
@@ -188,4 +193,6 @@ $exitCode = $process.ExitCode
 if ($null -ne $exitCode -and $exitCode -ne 0) { throw "QEMU WAV capture exited with $exitCode." }
 
 & $analyzer -Path $wavPath -Expected Continuous
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $r4gbAnalyzer -Path $wavPath
 exit $LASTEXITCODE

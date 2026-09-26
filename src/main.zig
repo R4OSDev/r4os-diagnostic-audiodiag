@@ -121,6 +121,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_signal.last_write_bytes > 0 and
         status_signal.last_write_bytes <= variable_pcm.len;
 
+    // Fast producers can submit the complete short capture before the first
+    // DMA interrupt. Observe productive asynchronous work before idle/Close
+    // switches the driver to synchronous drain; otherwise this check depends
+    // on incidental producer latency rather than IRQ/worker correctness.
+    const asynchronous_progress_ok = writes_ok and waitForDeadlineProgress(&ctx, work_before.deadline_submitted, work_before.deadline_started);
+
     const idle_written = switch (stream.write(&silence, r4os.time_contract.timeoutForever())) {
         .written => |bytes| bytes,
         else => 0,
@@ -162,7 +168,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         perf_after.audio_backend_refills > perf_before.audio_backend_refills and
         perf_after.audio_stream_write_total_ticks >= perf_before.audio_stream_write_total_ticks and
         perf_after.audio_backend_write_total_ticks >= perf_before.audio_backend_write_total_ticks;
-    const deadline_ok = work_after.version >= 2 and work_after.deadline_worker_count == 1 and
+    const deadline_ok = asynchronous_progress_ok and work_after.version >= 2 and work_after.deadline_worker_count == 1 and
         work_after.deadline_worker_started != 0 and
         work_after.deadline_submitted > work_before.deadline_submitted and
         work_after.deadline_started > work_before.deadline_started and
@@ -613,6 +619,17 @@ fn containsText(value: []const u8, needle: []const u8) bool {
         if (index == needle.len) return true;
     }
     return false;
+}
+
+fn waitForDeadlineProgress(ctx: *const DiagApi, submitted: u64, started: u64) bool {
+    const began = ctx.sys.ticks();
+    const timeout = @max(ctx.sys.ticksFromMilliseconds(100), 1);
+    while (true) {
+        const work = ctx.performance.driverWork(0) orelse return false;
+        if (work.deadline_submitted > submitted and work.deadline_started > started) return true;
+        if (ctx.sys.ticks() -| began >= timeout) return false;
+        ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(1), 1));
+    }
 }
 
 fn waitServiceStatus(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceStatus, max_ticks: u64) bool {

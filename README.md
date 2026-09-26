@@ -70,3 +70,12 @@ procedure is in `Docs/Audio/AudioDiagnostics.txt`.
 Original R4OS material is licensed under Apache License 2.0. See `LICENSE`
 and `NOTICE`. Any repository-specific external material is documented in
 `THIRD_PARTY_NOTICES.md`.
+
+Short capture IRQ witness (0.81.17)
+---------------------------------
+Before idle/Close starts synchronous drain, AudioDiag waits at most 100 ms
+for one submitted and started audio deadline job, checking once per ms.
+The 8,280-frame signal is unchanged. A fast producer must not fail the
+asynchronous-lane check merely because all writes precede the first IRQ.
+A missing worker or timeout still fails; zero new misses, overruns, drops
+and backend errors remain mandatory.

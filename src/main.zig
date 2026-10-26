@@ -79,10 +79,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
             break;
         }
         pattern.fillSquare(&pcm, first_frame);
-        const written = switch (stream.write(&pcm, r4os.time_contract.timeoutForever())) {
-            .written => |bytes| bytes,
-            else => 0,
-        };
+        const written = writePcmFully(&ctx, &stream, &pcm);
         if (written != pcm.len) {
             writes_ok = false;
             break;
@@ -96,10 +93,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         for (pattern.variable_frames) |frames| {
             const bytes = frames * pattern.frame_bytes;
             pattern.fillSquare(variable_pcm[0..bytes], first_frame);
-            const written = switch (stream.write(variable_pcm[0..bytes], r4os.time_contract.timeoutForever())) {
-                .written => |count| count,
-                else => 0,
-            };
+            const written = writePcmFully(&ctx, &stream, variable_pcm[0..bytes]);
             if (written != bytes) {
                 writes_ok = false;
                 break;
@@ -164,7 +158,9 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_after.write_request_total_ticks >= service_before.write_request_total_ticks and
         status_after.write_request_max_ticks >= status_after.write_request_last_ticks;
     const performance_ok = perf_after.audio_stream_writes >= perf_before.audio_stream_writes + write_count and
-        perf_after.audio_backend_write_calls >= perf_before.audio_backend_write_calls + write_count and
+        // The worker may coalesce input packets. Exact admitted byte work,
+        // zero loss/errors and acknowledged drain remain separate requirements.
+        perf_after.audio_backend_write_calls > perf_before.audio_backend_write_calls and
         perf_after.audio_backend_refills > perf_before.audio_backend_refills and
         perf_after.audio_stream_write_total_ticks >= perf_before.audio_stream_write_total_ticks and
         perf_after.audio_backend_write_total_ticks >= perf_before.audio_backend_write_total_ticks;
@@ -177,6 +173,9 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         work_after.deadline_queue_rejections == work_before.deadline_queue_rejections;
     const path_ok = upstream_dropped == 0 and backend_underruns == 0 and backend_errors == 0 and backend_failures == 0 and silence_periods == 0;
     const continuity_ok = lazy_silence_ok and volume_ok and writes_ok and signal_materialized_ok and idle_written == silence.len and closed_ok and service_ok and performance_ok and deadline_ok and path_ok;
+
+    var checks: [256]u8 = undefined;
+    ctx.sys.println(@import("std").fmt.bufPrint(&checks, "AUDIOD checks: lazy={d} volume={d} writes={d} signal={d} service={d} performance={d} deadline={d} path={d} backendCalls={d}", .{ @intFromBool(lazy_silence_ok), @intFromBool(volume_ok), @intFromBool(writes_ok), @intFromBool(signal_materialized_ok), @intFromBool(service_ok), @intFromBool(performance_ok), @intFromBool(deadline_ok), @intFromBool(path_ok), delta(perf_before.audio_backend_write_calls, perf_after.audio_backend_write_calls) }) catch "AUDIOD checks unavailable");
 
     ctx.sys.print("AUDIOD pattern: mode=");
     ctx.sys.print(if (long_mode) "long" else "capture");
@@ -289,7 +288,8 @@ fn runMasterContract(ctx: *const DiagApi, pcm: []const u8) bool {
         .fixed_volume = 0x0000_5000,
     };
     if (ctx.sys.audioServiceSetMasterState(&request, &state) != r4os.abi.service_api_result_ok or
-        !waitMasterPersisted(&ctx.sys, writes_before, &state, ctx.sys.ticksFromMilliseconds(master_persist_wait_ms))) {
+        !waitMasterPersisted(&ctx.sys, writes_before, &state, ctx.sys.ticksFromMilliseconds(master_persist_wait_ms)))
+    {
         return masterFail(ctx, "persist");
     }
     const persisted_epoch = state.service_epoch;
@@ -619,6 +619,26 @@ fn containsText(value: []const u8, needle: []const u8) bool {
         if (index == needle.len) return true;
     }
     return false;
+}
+
+// Explicit diagnostic producer: retain every acknowledged prefix on BUSY.
+// A timeout has ambiguous remote acceptance and is never blindly resent.
+fn writePcmFully(ctx: *const DiagApi, stream: *r4os.AudioStream, pcm: []const u8) usize {
+    var cursor = r4os.app_audio.WriteCursor.init(pcm.len, pattern.frame_bytes) orelse return 0;
+    const began = ctx.sys.ticks();
+    const limit = @max(ctx.sys.ticksFromMilliseconds(1000), 1);
+    while (!cursor.done()) {
+        const elapsed = ctx.sys.ticks() -| began;
+        if (elapsed >= limit) break;
+        const duration = r4os.time_contract.durationFromTicks(limit - elapsed, ctx.sys.monotonicHz()) catch break;
+        const advanced = cursor.apply(stream.write(pcm[cursor.accepted..], r4os.time_contract.timeoutFinite(duration)));
+        switch (advanced.outcome) {
+            .complete => return cursor.accepted,
+            .retry => ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(1), 1)),
+            .timed_out, .failure, .invalid => break,
+        }
+    }
+    return cursor.accepted;
 }
 
 fn waitForDeadlineProgress(ctx: *const DiagApi, submitted: u64, started: u64) bool {

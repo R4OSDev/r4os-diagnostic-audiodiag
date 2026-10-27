@@ -9,9 +9,10 @@ fn fail(ctx: anytype, stage: []const u8) i32 {
     return 1;
 }
 
-fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgressRequest, out: *a.AudioServiceStreamProgressState, deadline: u64, closing: bool) bool {
+fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgressRequest, out: *a.AudioServiceStreamProgressState, deadline: u64, closing: bool, close_attempts: *u32) bool {
     const op = if (closing) a.audio_service_op_close_stream_progress else a.audio_service_op_stream_progress;
     while (ctx.sys.ticks() < deadline) {
+        if (closing) close_attempts.* += 1;
         const response = stream.connection.callTyped(a.AudioServiceStreamProgressRequest, a.AudioServiceStreamProgressState, op, &key, r.time_contract.timeoutFinite(.{ .nanoseconds = 100_000_000 }));
         switch (response) {
             .value => |value| {
@@ -56,13 +57,14 @@ pub fn run(ctx: anytype) i32 {
     var first: a.AudioServiceStreamProgressState = .{};
     var current: a.AudioServiceStreamProgressState = .{};
     var key = a.AudioServiceStreamProgressRequest{ .stream_id = stream.stream_id };
+    var close_attempts: u32 = 0;
     for ([_][]const u8{ &signal, &silence, &signal }, 0..) |bytes, index| {
         const result = stream.write(bytes, timeout);
         switch (result) {
             .written => |n| if (n != bytes.len) return fail(ctx, "complete PCM write"),
             else => return fail(ctx, "write"),
         }
-        if (!query(ctx, &stream, key, &current, deadline, false)) return fail(ctx, "progress");
+        if (!query(ctx, &stream, key, &current, deadline, false, &close_attempts)) return fail(ctx, "progress");
         if (index == 0) {
             first = current;
             key.service_epoch = first.service_epoch;
@@ -76,7 +78,7 @@ pub fn run(ctx: anytype) i32 {
             return fail(ctx, "no silent close/reopen");
     }
     var closed: a.AudioServiceStreamProgressState = .{};
-    if (!query(ctx, &stream, key, &closed, deadline, true)) return fail(ctx, "terminal close");
+    if (!query(ctx, &stream, key, &closed, deadline, true, &close_attempts)) return fail(ctx, "terminal close");
     if (!sameBackend(first, closed) or (closed.progress.flags & a.audio_progress_closed) == 0 or
         (closed.progress.flags & a.audio_progress_device_valid) == 0 or closed.progress.accepted_frames != 1440 or
         closed.progress.backend_frames != 1440 or closed.progress.submitted_frames != 1440 or closed.progress.consumed_frames != 1440 or
@@ -89,9 +91,9 @@ pub fn run(ctx: anytype) i32 {
     var after: a.AudioServiceStatus = .{};
     if (ctx.sys.audioServiceStatus(&after) != 0 or after.open_sessions != before.open_sessions or
         after.materialized_sessions != before.materialized_sessions or after.lazy_open_count != before.lazy_open_count + 1 or
-        after.idle_close_count != before.idle_close_count or after.stream_close_requests != before.stream_close_requests + 1 or
+        after.idle_close_count != before.idle_close_count or close_attempts == 0 or after.stream_close_requests != before.stream_close_requests + close_attempts or
         after.backend_fail != before.backend_fail) return fail(ctx, "exact resource baseline");
     var line: [320]u8 = undefined;
-    ctx.sys.println(std.fmt.bufPrint(&line, "AUDIOD GAP accepted=1440 backend=1440 dma=1440 consumed=1440 silent=480 suppressed=0 unconfirmed=0 same-stream=1 opens=1 silent-closes=0 closed=1 resources=restored kernel-stream={d} generation={d} [OK]", .{ closed.progress.stream_id, closed.progress.stream_generation }) catch return fail(ctx, "format"));
+    ctx.sys.println(std.fmt.bufPrint(&line, "AUDIOD GAP accepted=1440 backend=1440 dma=1440 consumed=1440 silent=480 suppressed=0 unconfirmed=0 same-stream=1 opens=1 silent-closes=0 closed=1 resources=restored kernel-stream={d} generation={d} close-attempts={d} [OK]", .{ closed.progress.stream_id, closed.progress.stream_generation, close_attempts }) catch return fail(ctx, "format"));
     return 0;
 }

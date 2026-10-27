@@ -16,6 +16,7 @@ const DiagApi = struct {
 pub fn r4_app_main(app: *r4os.App) i32 {
     var ctx = DiagApi.init(app) orelse return r4os.abi.err_no_group;
     const args = app.args();
+    if (containsIgnoreCase(args, "/GAP")) return @import("gap.zig").run(&ctx);
     if (containsIgnoreCase(args, "/PROGRESS")) return @import("progress.zig").run(&ctx);
     const long_mode = containsIgnoreCase(args, "/LONG");
     var evidence_path: [evidence_path_capacity:0]u8 = .{0} ** evidence_path_capacity;
@@ -151,7 +152,8 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_after.stream_write_requests >= service_before.stream_write_requests + write_count + 2 and
         status_after.bytes_written >= service_before.bytes_written + expected_bytes and
         status_after.materialized_sessions == service_before.materialized_sessions and
-        status_after.idle_close_count > service_before.idle_close_count and
+        status_after.idle_close_count == service_before.idle_close_count and
+        status_after.stream_close_requests > service_before.stream_close_requests and
         status_after.silence_write_count >= service_before.silence_write_count + 2 and
         status_after.silence_bytes >= service_before.silence_bytes + silence.len * 2 and
         status_after.request_total_ticks >= service_before.request_total_ticks and

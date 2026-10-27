@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.12`
+- Version: `0.2.13`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -12,7 +12,15 @@
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
 
-Version0.2.12 adds `AUDIOD /PROGRESS`, a bounded real-device check separate
+Version0.2.13 adds `AUDIOD /GAP`: the real AudioService receives480 signal,
+480 zero and480 signal frames on one ordinary logical/backend generation.
+It requires1440 actual backend/DMA/consumed frames, no suppressed or unknown
+remainder, no silent Close/reopen, a real terminal Close and restored session
+resources. This is a bounded explicit diagnostic, with no speaker receipt.
+Normal AudioDiag now requires an active zero block to retain its stream
+until the explicit Close instead of expecting the old premature idle close.
+
+Version0.2.12 added `AUDIOD /PROGRESS`, a bounded real-device check separate
 from the original PCM/lifecycle/WAV cases. It observes exact stream identity,
 480 accepted/backend/DMA/consumed canonical frames and zero unknown residue;
 an intentionally interrupted continuous source reports one undersupply

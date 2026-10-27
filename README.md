@@ -4,13 +4,22 @@
 
 ## Package
 
-- Version: `0.2.5`
+- Version: `0.2.12`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Version0.2.12 adds `AUDIOD /PROGRESS`, a bounded real-device check separate
+from the original PCM/lifecycle/WAV cases. It observes exact stream identity,
+480 accepted/backend/DMA/consumed canonical frames and zero unknown residue;
+an intentionally interrupted continuous source reports one undersupply
+episode. A newly opened stream rejects the old generation. Clocked zero PCM
+with explicit end stays regular idle and closes cleanly. MMIO progress is a
+device receipt, not a claim about audible speaker output. The existing normal
+AudioDiag and its strict original WAV/count/drop/error checks remain required.
 
 ## Build
 

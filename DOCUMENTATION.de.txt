@@ -1,4 +1,4 @@
-﻿AUDIOD.R4X 0.2.5
+﻿AUDIOD.R4X 0.2.12
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
@@ -93,3 +93,14 @@ QEMU-WAV-Abnahme aus dem Workspace:
 
     powershell -File Tests\Invoke-QemuWavCapture.ps1 -Profile Test
     pwsh -NoLogo -NoProfile -File Tests/Invoke-QemuWavCapture.ps1 -Profile Test
+
+0.87.53 /PROGRESS
+-----------------
+AUDIOD /PROGRESS prueft den echten streambezogenen48kHz/stereo/S16-Pfad
+getrennt von den bisherigen PCM-/WAV-/Lifecyclefaellen. Annahme, Backend,
+DMA und konsumierte480Frames werden getrennt beobachtet. Absichtliche leere
+kontinuierliche Zufuhr nach fester Frist zaehlt eine Quellunterversorgung;
+explizites Ende mit getaktetem Null-PCM bleibt reguläres Idle. Beide Streams
+schliessen echt, eine alte Streamgeneration wird abgewiesen. Die Ausgabe
+behauptet keine physische Lautsprecherquittung. Fachbeleg/Hardwaregrenzen:
+Docs/Audio/PlaybackProgress.txt im R4OS-Workspace.

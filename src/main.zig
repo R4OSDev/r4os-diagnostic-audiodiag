@@ -16,6 +16,7 @@ const DiagApi = struct {
 pub fn r4_app_main(app: *r4os.App) i32 {
     var ctx = DiagApi.init(app) orelse return r4os.abi.err_no_group;
     const args = app.args();
+    if (containsIgnoreCase(args, "/PROGRESS")) return @import("progress.zig").run(&ctx);
     const long_mode = containsIgnoreCase(args, "/LONG");
     var evidence_path: [evidence_path_capacity:0]u8 = .{0} ** evidence_path_capacity;
     const evidence_requested = argumentSpecified(args, "OUT");
@@ -347,7 +348,13 @@ fn runLifecycleContract(ctx: *const DiagApi) bool {
             active.last_write_bytes != sample.len)
             return lifecycleFail(ctx, "active-state");
 
-        if (ctx.sys.audioServiceClose(stream_id) != r4os.abi.service_api_result_ok) return lifecycleFail(ctx, "close");
+        const close_result = ctx.sys.audioServiceClose(stream_id);
+        if (close_result != r4os.abi.service_api_result_ok) {
+            ctx.sys.print("AUDIOD lifecycle close result=");
+            ctx.sys.printI32(close_result);
+            ctx.sys.println("");
+            return lifecycleFail(ctx, "close");
+        }
         close_needed = false;
         var closed: r4os.abi.AudioServiceStatus = .{};
         if (ctx.sys.audioServiceStatus(&closed) != r4os.abi.service_api_result_ok or

@@ -1,9 +1,22 @@
-﻿AUDIOD.R4X 0.2.12
+﻿AUDIOD.R4X 0.2.15
 ================
 
 AUDIOD ist die deterministische End-to-End-Diagnose fuer R4AUDIO, AUDSVC und
 den aktiven Hardwaretreiber. Das Testprofil installiert sie unter
 C:\R4OS\SOFTWARE\TERMINAL\DIAG\AUDIOD.R4X.
+
+GAP-Fehlerbeleg seit 0.2.15
+-------------------------
+AUDIOD /GAP meldet bei Open-, Progress- oder Close-Fehlern die Phase, das
+typisierte Ergebnis und den tatsaechlichen Transport-/Antwortcode, sofern
+einer vorliegt. Der Stream bleibt ueber ID und Generation zugeordnet. Die
+RPC-Frist bleibt 100ms, die Gesamtfrist 3s. Ein Ablauf der Gesamtfrist ohne
+neuen RPC wird ohne erfundenen Rueckgabecode ausgegeben. Kein neuer Retry,
+Sampler oder gelockerter Frame-/Close-/Ressourcenvertrag. Die neue Ausgabe
+erklaert einen aelteren Open-Fehler noch nicht. Native417/16 mit15 besteht
+GAP1440/terminalClose/Ressourcenrest, OriginalPCM8280/HDA/Lifecycle und
+Progress480. HDA-Control793Turns/474Fortsetzungen/max16; Hoerquittung SKIP.
+Getrennte fruehere55/57/59Fehler bleiben fuer integrierte66 erhalten.
 
 Standardmodus
 -------------

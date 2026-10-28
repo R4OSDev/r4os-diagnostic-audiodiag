@@ -9,6 +9,11 @@ fn fail(ctx: anytype, stage: []const u8) i32 {
     return 1;
 }
 
+fn transportFailure(ctx: anytype, stage: []const u8, outcome: []const u8, raw: ?i32, stream: u32) void {
+    var line: [256]u8 = undefined;
+    ctx.sys.println(std.fmt.bufPrint(&line, "AUDIOD GAP detail stage={s} outcome={s} raw={?d} stream={d} rpc-timeout-ns=100000000", .{stage,outcome,raw,stream}) catch "AUDIOD GAP detail formatting failed");
+}
+
 fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgressRequest, out: *a.AudioServiceStreamProgressState, deadline: u64, closing: bool, close_attempts: *u32) bool {
     const op = if (closing) a.audio_service_op_close_stream_progress else a.audio_service_op_stream_progress;
     while (ctx.sys.ticks() < deadline) {
@@ -21,14 +26,23 @@ fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgress
                     continue;
                 }
                 if (value.result != 0 or value.magic != (a.AudioServiceStreamProgressState{}).magic or value.version != 1 or value.size != @sizeOf(@TypeOf(value)) or value.stream_id != stream.stream_id or
-                    value.service_epoch == 0 or value.stream_generation == 0 or value.progress.version != 1 or value.progress.size != @sizeOf(a.AudioStreamProgress)) return false;
-                if (key.service_epoch != 0 and (value.service_epoch != key.service_epoch or value.stream_generation != key.stream_generation)) return false;
+                    value.service_epoch == 0 or value.stream_generation == 0 or value.progress.version != 1 or value.progress.size != @sizeOf(a.AudioStreamProgress)) {
+                    transportFailure(ctx, if(closing) "terminal-close" else "progress", "invalid-response", value.result, stream.stream_id);
+                    return false;
+                }
+                if (key.service_epoch != 0 and (value.service_epoch != key.service_epoch or value.stream_generation != key.stream_generation)) {
+                    transportFailure(ctx, if(closing) "terminal-close" else "progress", "identity-changed", value.result, stream.stream_id);
+                    return false;
+                }
                 out.* = value;
                 return true;
             },
-            else => return false,
+            .timed_out => { transportFailure(ctx, if(closing) "terminal-close" else "progress", "timed-out", a.service_api_result_timeout, stream.stream_id); return false; },
+            .remote_failure => |raw| { transportFailure(ctx, if(closing) "terminal-close" else "progress", "remote-failure", raw, stream.stream_id); return false; },
+            .failure => |raw| { transportFailure(ctx, if(closing) "terminal-close" else "progress", "call-failure", raw, stream.stream_id); return false; },
         }
     }
+    transportFailure(ctx, if(closing) "terminal-close" else "progress", "overall-deadline-no-new-rpc", null, stream.stream_id);
     return false;
 }
 
@@ -46,7 +60,9 @@ pub fn run(ctx: anytype) i32 {
     if (ctx.sys.audioServiceStatus(&before) != 0) return fail(ctx, "service before");
     var stream = switch (ctx.audio.openStream(48000, 2, .s16le, 0x10000, timeout)) {
         .stream => |s| s,
-        else => return fail(ctx, "open"),
+        .timed_out => { transportFailure(ctx, "open", "timed-out", a.service_api_result_timeout, 0); return fail(ctx, "open"); },
+        .no_service => |raw| { transportFailure(ctx, "open", "no-service", raw, 0); return fail(ctx, "open"); },
+        .failure => |raw| { transportFailure(ctx, "open", "facade-failure", raw, 0); return fail(ctx, "open"); },
     };
     defer if (stream.valid()) {
         _ = stream.close(timeout);

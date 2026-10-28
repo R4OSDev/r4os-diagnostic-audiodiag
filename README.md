@@ -4,13 +4,27 @@
 
 ## Package
 
-- Version: `0.2.13`
+- Version: `0.2.15`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Version0.2.15 adds failure-only GAP Open/Progress/Close evidence: the typed
+outcome, actual transport/response code when one exists, exact stream identity,
+and the unchanged100ms RPC budget. An overall3s expiry reports no invented
+RPC code. This adds neither retries nor a normal-operation sampler and keeps
+the original frame, terminal Close and resource oracles. A current KVM mixed
+run passed all eight original GAPs; an earlier fifth Open failure remains
+unexplained. Native417/16 with15 passes the original GAP1440/terminal Close/
+restored resources, full8280-frame PCM/HDA/lifecycle checks and Progress480.
+HDA control reports793 turns/474 continuations/max16; physical hearing is skipped.
+Separate integrated57/55 and59 failure observations remain open in66.
+
+Version0.2.14 checks a real BUSY terminal Close against its exact stream and
+keeps the original bounded wait and final resource checks.
 
 Version0.2.13 adds `AUDIOD /GAP`: the real AudioService receives480 signal,
 480 zero and480 signal frames on one ordinary logical/backend generation.

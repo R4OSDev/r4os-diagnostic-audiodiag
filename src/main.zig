@@ -167,13 +167,11 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_after.request_max_ticks >= status_after.request_last_ticks and
         status_after.write_request_total_ticks >= service_before.write_request_total_ticks and
         status_after.write_request_max_ticks >= status_after.write_request_last_ticks;
-    const performance_ok = perf_after.audio_stream_writes >= perf_before.audio_stream_writes + write_count and
+    const performance_ok = audioDurationsUnavailable(perf_before) and audioDurationsUnavailable(perf_after) and perf_after.audio_stream_writes >= perf_before.audio_stream_writes + write_count and
         // The worker may coalesce input packets. Exact admitted byte work,
         // zero loss/errors and acknowledged drain remain separate requirements.
         perf_after.audio_backend_write_calls > perf_before.audio_backend_write_calls and
-        perf_after.audio_backend_refills > perf_before.audio_backend_refills and
-        perf_after.audio_stream_write_total_ticks >= perf_before.audio_stream_write_total_ticks and
-        perf_after.audio_backend_write_total_ticks >= perf_before.audio_backend_write_total_ticks;
+        perf_after.audio_backend_refills > perf_before.audio_backend_refills;
     const deadline_ok = asynchronous_progress_ok and work_after.version >= 2 and work_after.deadline_worker_count == 1 and
         work_after.deadline_worker_started != 0 and
         work_after.deadline_submitted > work_before.deadline_submitted and
@@ -199,7 +197,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     printPathDeltas(&ctx, upstream_dropped, backend_underruns, backend_errors, backend_failures, silence_periods);
     printIdlePath(&ctx, status_after, service_before);
     printDeadlinePath(&ctx, work_after, work_before);
-    printLatency(&ctx, perf_after);
+    printAudioWork(&ctx, perf_after);
     printServiceLatency(&ctx, status_after);
     ctx.sys.print("Audio PCM continuity diagnostics: ");
     ctx.sys.println(if (continuity_ok) "OK" else "FAILED");
@@ -798,21 +796,30 @@ fn printPathDeltas(ctx: *const DiagApi, upstream_dropped: u64, backend_underruns
     ctx.sys.write("\r\n");
 }
 
-fn printLatency(ctx: *const DiagApi, summary: r4os.abi.ProgramPerformanceSummary) void {
-    ctx.sys.print("AUDIOD latency: writes=");
+fn audioDurationsUnavailable(summary: r4os.abi.ProgramPerformanceSummary) bool {
+    const values = [_]u64{
+        summary.audio_stream_write_total_ticks,
+        summary.audio_stream_write_max_ticks,
+        summary.audio_stream_write_last_ticks,
+        summary.audio_backend_write_total_ticks,
+        summary.audio_backend_write_max_ticks,
+        summary.audio_backend_write_last_ticks,
+        summary.audio_backend_refill_total_ticks,
+        summary.audio_backend_refill_max_ticks,
+        summary.audio_backend_refill_last_ticks,
+    };
+    for (values) |value| if (value != r4os.abi.audio_duration_ticks_unavailable) return false;
+    return (summary.flags & r4os.abi.performance_flag_audio_latency_ready) == 0;
+}
+
+fn printAudioWork(ctx: *const DiagApi, summary: r4os.abi.ProgramPerformanceSummary) void {
+    ctx.sys.print("AUDIOD audio work: writes=");
     ctx.sys.printU64(summary.audio_stream_writes);
     ctx.sys.print(" high=");
     ctx.sys.printU64(summary.audio_stream_high_water_bytes);
     ctx.sys.print(" dropped=");
     ctx.sys.printU64(summary.audio_stream_dropped_bytes);
-    ctx.sys.print(" streamTicks=");
-    ctx.sys.printU64(summary.audio_stream_write_last_ticks);
-    ctx.sys.print("/");
-    ctx.sys.printU64(summary.audio_stream_write_max_ticks);
-    ctx.sys.print(" backendTicks=");
-    ctx.sys.printU64(summary.audio_backend_write_last_ticks);
-    ctx.sys.print("/");
-    ctx.sys.printU64(summary.audio_backend_write_max_ticks);
+    ctx.sys.print(" duration=unavailable(retired)");
     ctx.sys.print(" refills=");
     ctx.sys.printU64(summary.audio_backend_refills);
     ctx.sys.print(" queued=");

@@ -4,13 +4,24 @@
 
 ## Package
 
-- Version: `0.2.15`
+- Version: `0.2.17`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Version0.2.17 validates explicitly requested HDA46 completion snapshots.
+Enable `OPTION HDA details=on` before driver initialization. The Test profile
+and prepared hardware-acceptance images do so; Slim and Full default to off.
+Without a detail request, functional PCM/master/lifecycle checks still run and
+the HDA detail result says `SKIP not-requested`. `/DETAILS` and `/OUT` require
+fresh complete evidence and fail if the driver option is off or data is lost.
+Each snapshot binds the loaded driver epoch/sequence, output/reset identity,
+PCI function, semaphore handle and capture tick. Original line lengths and
+all fragments/footer counts must match; full-width counters survive the
+160-byte LogService record bound.
 
 Version0.2.15 adds failure-only GAP Open/Progress/Close evidence: the typed
 outcome, actual transport/response code when one exists, exact stream identity,
@@ -74,8 +85,8 @@ DriverApi-v20 audio lane records productive work without a new deadline miss,
 budget overrun, or admission rejection.
 It then restarts AUDSVC, replays four bounded partial-period
 Open/Write/Close cycles, proves all logical and materialized sessions return
-to zero, and validates the HDA core/runtime diagnostic records through
-LogService. The serial lifecycle and diagnostic markers are part of the
+to zero, and, when requested, validates reconstructed HDA core/runtime lines
+from one coherent LogService snapshot. The serial lifecycle and diagnostic markers are part of the
 existing Test-profile acceptance contract.
 The runtime record must also expose position-source mismatch and fallback
 counters, so physical LPIB fallback cannot be mislabeled as active DMA merely
@@ -84,11 +95,11 @@ The final cold and warm Lenovo acceptance produced six complete runtime groups
 per boot with `pos=lpib-fallback pmis=3 pfb=3`, advancing writes and every
 stream, recovery, timeout and work-drop counter at zero.
 
-For physical evidence, `/OUT=<path>` atomically exports the still-current HDA
-driver records before AUDIOD exits. The run fails unless candidate decisions,
-the selected controller, the compact core record and a close-runtime record
-are all present. This avoids relying on unsupported external redirection or a
-later GUI export after the bounded log window has advanced.
+For evidence, `/OUT=<path>` writes the already validated immutable snapshot
+with its identity header before AUDIOD exits. The run fails unless candidate
+decisions, selected controller, complete core and close-runtime lines are all
+present, or if writing fails. Export does not query mutable log pages again.
+Physical hearing and latency remain separate acceptance results.
 
 Run `Build.bat test` for component and analyzer selftests. Run
 `Tests/Invoke-QemuWavCapture.ps1` from the workspace for the full Test-image

@@ -1,5 +1,6 @@
 const r4os = @import("r4os");
 const pattern = @import("pattern.zig");
+const hda_details = @import("hda_details.zig");
 const master_persist_wait_ms: u64 = 15_000;
 const evidence_path_capacity: usize = 128;
 
@@ -7,6 +8,8 @@ const DiagApi = struct {
     sys: r4os.r4sys.Context,
     audio: r4os.Audio,
     performance: r4os.PerformanceView,
+    detail_sequence: u64 = 0,
+    detail_tick: u64 = 0,
 
     fn init(app: *r4os.App) ?DiagApi {
         return .{ .sys = app.system(), .audio = app.audio() orelse return null, .performance = (app.devices() orelse return null).performance() };
@@ -40,6 +43,10 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.print("AUDIOD service=AUDSVC status=");
     ctx.sys.println(if (service_ready) "OK" else "FAILED");
     if (!service_ready) return fail(&ctx, "audio service status");
+    var log_status: r4os.abi.LogServiceStatus = .{};
+    if (ctx.sys.logServiceStatus(&log_status) == 0 and log_status.magic == r4os.abi.log_service_status_magic and log_status.version == r4os.abi.log_service_version)
+        ctx.detail_sequence = log_status.total_records;
+    ctx.detail_tick = ctx.sys.ticks();
     const service_before = status;
 
     var stream = switch (ctx.audio.openStream(pattern.sample_rate, pattern.channels, .s16le, 0x00010000, r4os.time_contract.timeoutForever())) {
@@ -198,13 +205,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.println(if (continuity_ok) "OK" else "FAILED");
     const master_ok = runMasterContract(&ctx, pcm[0..]);
     const lifecycle_ok = if (master_ok) runLifecycleContract(&ctx) else false;
-    const hda_diagnostic_ok = if (lifecycle_ok) waitForHdaDiagnostic(&ctx) else false;
-    const evidence_ok = if (evidence_path_value != null and hda_diagnostic_ok)
-        exportHdaEvidence(&ctx, @ptrCast(&evidence_path), evidence_path_value.?)
-    else
-        evidence_path_value == null;
+    const details_requested = evidence_path_value != null or containsIgnoreCase(args, "/DETAILS") or hdaModeRequested(&ctx);
+    const hda_diagnostic_ok = if (lifecycle_ok and details_requested)
+        waitForHdaDiagnostic(&ctx, if (evidence_path_value != null) @as([*:0]const u8, @ptrCast(&evidence_path)) else null, evidence_path_value)
+    else if (lifecycle_ok) skippedHdaDiagnostic(&ctx) else false;
     if (evidence_path_value != null and !hda_diagnostic_ok) ctx.sys.println("AUDIOD HDA evidence: FAILED diagnostic-unavailable");
-    const ok = continuity_ok and master_ok and lifecycle_ok and hda_diagnostic_ok and evidence_ok;
+    const ok = continuity_ok and master_ok and lifecycle_ok and hda_diagnostic_ok;
     ctx.sys.print("AUDIOD result: ");
     ctx.sys.println(if (ok) "OK" else "FAILED");
     return if (ok) 0 else 1;
@@ -443,121 +449,128 @@ fn printHdaRecord(ctx: *const DiagApi, search: []const u8) void {
     ctx.sys.println("AUDIOD driver record: missing");
 }
 
-fn waitForHdaDiagnostic(ctx: *const DiagApi) bool {
+fn skippedHdaDiagnostic(ctx: *const DiagApi) bool {
+    ctx.sys.println("AUDIOD HDA diagnostic: SKIP not-requested (OPTION HDA details=on or /DETAILS /OUT)");
+    return true;
+}
+
+fn hdaPage(ctx: *const r4os.r4sys.Context, query: *const r4os.abi.LogServiceRecordQuery, page: *r4os.abi.LogServiceRecordPage) bool {
+    if (ctx.logServiceRecords(query, page) != 0 or page.magic != r4os.abi.log_service_record_page_magic or page.version != r4os.abi.log_service_version or page.count > page.records.len) return false;
+    for (page.records[0..page.count]) |record| {
+        if (record.magic != r4os.abi.log_service_record_magic or record.version != r4os.abi.log_service_version or record.source_id != r4os.abi.log_service_source_driver or record.text_len > record.text.len) return false;
+    }
+    return true;
+}
+
+fn hdaModeRequested(ctx: *const DiagApi) bool {
+    var query = r4os.abi.LogServiceRecordQuery{ .source_id = r4os.abi.log_service_source_driver, .severity_min = r4os.abi.log_severity_debug };
+    copyFixedZ(query.search[0..], "HDA.DIAG mode=");
+    var latest: u64 = 0;
+    var enabled = false;
+    var rounds: usize = 0;
+    while (rounds < 64) : (rounds += 1) {
+        var page: r4os.abi.LogServiceRecordPage = .{};
+        if (!hdaPage(&ctx.sys, &query, &page)) break;
+        for (page.records[0..page.count]) |record| {
+            if (record.sequence <= latest) continue;
+            latest = record.sequence;
+            enabled = containsText(record.text[0..record.text_len], "details-requested");
+        }
+        if ((page.flags & r4os.abi.log_service_page_flag_more) == 0) break;
+        if (page.next_index <= query.start_index) break;
+        query.start_index = page.next_index;
+    }
+    if (latest != 0) return enabled;
+    // A long explicit session can outlive the initial mode banner. A fresh
+    // begin record still states that the provider is publishing details.
+    query.start_index = 0;
+    copyFixedZ(query.search[0..], "HDA.SNAP begin");
+    var page: r4os.abi.LogServiceRecordPage = .{};
+    if (!hdaPage(&ctx.sys, &query, &page)) return false;
+    for (page.records[0..page.count]) |record| if (record.sequence > ctx.detail_sequence) return true;
+    return false;
+}
+
+noinline fn waitForHdaDiagnostic(ctx: *const DiagApi, path: ?[*:0]const u8, path_text: ?[]const u8) bool {
     const core_fields = [_][]const u8{
         "stage=ready", " pci=", " id=", " gcap=", " str=", " tr=", " codec=", " afg=", " route=", " pin=", " fmt=",
     };
     const runtime_fields = [_][]const u8{
         "phase=close", " irq=", " pos=", " pmis=", " pfb=", " wr=", " und=", " fifo=", " dese=", " prec=", " rec=", " to=", " drain=", " wdrop=", " own=",
     };
-    const poll_ticks = @max(ctx.sys.ticksFromMilliseconds(100), 1);
     const started = ctx.sys.ticks();
     const max_ticks = ctx.sys.ticksFromMilliseconds(5000);
-    var core_ok = false;
-    var runtime_ok = false;
     while (ctx.sys.ticks() -| started < max_ticks) {
-        if (!core_ok) core_ok = hdaRecordHasFields(&ctx.sys, "HDA.DIAG core", core_fields[0..]);
-        if (!runtime_ok) runtime_ok = hdaRecordHasFields(&ctx.sys, "HDA.DIAG run phase=close", runtime_fields[0..]);
-        if (core_ok and runtime_ok) {
+        var snapshot: hda_details.Snapshot = .{};
+        if (collectHdaSnapshot(ctx, &snapshot) and snapshot.contains("HDA.DIAG core", &core_fields) and
+            snapshot.contains("HDA.DIAG run phase=close", &runtime_fields) and
+            snapshot.contains("HDA.R4D controller candidate", &.{}) and snapshot.contains("HDA.R4D selected controller", &.{}))
+        {
             ctx.sys.println("AUDIOD HDA diagnostic: OK core=selection+transport+route+format runtime=irq+position counters=separate");
+            var line: [192]u8 = undefined;
+            ctx.sys.println(@import("std").fmt.bufPrint(&line, "AUDIOD HDA snapshot: coherent epoch={x} sequence={d} handle={x} output={d} reset={d} tick={d}", .{ snapshot.epoch, snapshot.sequence, snapshot.handle, snapshot.output, snapshot.reset, snapshot.capture_tick }) catch "AUDIOD HDA snapshot: format failed");
+            if (path) |filename| return exportHdaEvidence(ctx, filename, path_text.?, &snapshot);
             return true;
         }
-        ctx.sys.sleepTicks(poll_ticks);
+        ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(100), 1));
     }
-    ctx.sys.print("AUDIOD HDA diagnostic: FAILED core=");
-    ctx.sys.print(if (core_ok) "ok" else "missing");
-    ctx.sys.print(" runtime=");
-    ctx.sys.println(if (runtime_ok) "ok" else "missing");
+    ctx.sys.println("AUDIOD HDA diagnostic: FAILED incomplete/stale snapshot; enable OPTION HDA details=on before driver initialization");
     return false;
 }
 
-fn hdaRecordHasFields(ctx: *const r4os.r4sys.Context, search: []const u8, fields: []const []const u8) bool {
-    var query = r4os.abi.LogServiceRecordQuery{
-        .source_id = r4os.abi.log_service_source_driver,
-        .severity_min = r4os.abi.log_severity_debug,
-    };
-    copyFixedZ(query.search[0..], search);
-    var page = r4os.abi.LogServiceRecordPage{};
-    if (ctx.logServiceRecords(&query, &page) != r4os.abi.service_api_result_ok) return false;
-    var record_index: usize = 0;
-    while (record_index < page.count) : (record_index += 1) {
-        const record = &page.records[record_index];
-        const text_len = @min(@as(usize, record.text_len), record.text.len);
-        const text = record.text[0..text_len];
-        var field_index: usize = 0;
-        while (field_index < fields.len and containsText(text, fields[field_index])) : (field_index += 1) {}
-        if (field_index == fields.len) return true;
-    }
-    return false;
-}
-
-fn exportHdaEvidence(ctx: *const DiagApi, path: [*:0]const u8, path_text: []const u8) bool {
-    const candidate_count = hdaRecordCount(&ctx.sys, "HDA.R4D controller candidate") orelse 0;
-    const selected_count = hdaRecordCount(&ctx.sys, "HDA.R4D selected controller") orelse 0;
-    const core_count = hdaRecordCount(&ctx.sys, "HDA.DIAG core") orelse 0;
-    const runtime_count = hdaRecordCount(&ctx.sys, "HDA.DIAG run phase=close") orelse 0;
-    if (candidate_count == 0 or selected_count == 0 or core_count == 0 or runtime_count == 0) {
-        ctx.sys.print("AUDIOD HDA evidence: FAILED candidates=");
-        ctx.sys.printU64(candidate_count);
-        ctx.sys.print(" selected=");
-        ctx.sys.printU64(selected_count);
-        ctx.sys.print(" core=");
-        ctx.sys.printU64(core_count);
-        ctx.sys.print(" runtime=");
-        ctx.sys.printU64(runtime_count);
-        ctx.sys.println("");
-        return false;
-    }
-
-    var query = r4os.abi.LogServiceRecordQuery{
-        .source_id = r4os.abi.log_service_source_driver,
-        .severity_min = r4os.abi.log_severity_debug,
-    };
-    copyFixedZ(query.search[0..], "HDA");
-    _ = ctx.sys.fileDelete(path);
-    var first = true;
-    var pages: usize = 0;
-    var total_bytes: usize = 0;
-    while (pages < 64) : (pages += 1) {
-        var page = r4os.abi.LogServiceExportPage{};
-        if (ctx.sys.logServiceExport(&query, &page) != r4os.abi.service_api_result_ok) return hdaExportFail(ctx, "query");
-        const len = @min(@as(usize, page.bytes), page.text.len);
-        if (len != 0) {
-            const written = if (first) ctx.sys.fileWrite(path, page.text[0..len]) else ctx.sys.fileAppend(path, page.text[0..len]);
-            if (written != @as(i32, @intCast(len))) return hdaExportFail(ctx, "write");
-            first = false;
-            total_bytes += len;
+fn collectHdaSnapshot(ctx: *const DiagApi, snapshot: *hda_details.Snapshot) bool {
+    var query = r4os.abi.LogServiceRecordQuery{ .source_id = r4os.abi.log_service_source_driver, .severity_min = r4os.abi.log_severity_debug };
+    copyFixedZ(query.search[0..], "HDA.SNAP begin");
+    var newest = ctx.detail_sequence;
+    var rounds: usize = 0;
+    while (rounds < 64) : (rounds += 1) {
+        var page: r4os.abi.LogServiceRecordPage = .{};
+        if (!hdaPage(&ctx.sys, &query, &page)) return false;
+        for (page.records[0..page.count]) |record| {
+            if ((record.flags & r4os.abi.log_service_record_flag_truncated) != 0 or record.sequence <= newest) continue;
+            if (snapshot.start(record.text[0..record.text_len], record.sequence, ctx.detail_sequence)) newest = record.sequence;
         }
         if ((page.flags & r4os.abi.log_service_page_flag_more) == 0) break;
-        if (page.next_index <= query.start_index) return hdaExportFail(ctx, "pagination");
+        if (page.next_index <= query.start_index) return false;
         query.start_index = page.next_index;
     }
-    if (first or pages >= 64) return hdaExportFail(ctx, if (first) "empty" else "page-limit");
+    if (rounds == 64 or snapshot.epoch == 0) return false;
+    var key: [64]u8 = undefined;
+    const search = @import("std").fmt.bufPrint(&key, "e={x:0>16} s={x:0>16}", .{ snapshot.epoch, snapshot.sequence }) catch return false;
+    copyFixedZ(query.search[0..], search);
+    query.start_index = 0;
+    rounds = 0;
+    while (rounds < 64) : (rounds += 1) {
+        var page: r4os.abi.LogServiceRecordPage = .{};
+        if (!hdaPage(&ctx.sys, &query, &page)) return false;
+        for (page.records[0..page.count]) |record| {
+            if ((record.flags & r4os.abi.log_service_record_flag_truncated) != 0) return false;
+            snapshot.ingest(record.text[0..record.text_len], record.sequence);
+        }
+        if ((page.flags & r4os.abi.log_service_page_flag_more) == 0) break;
+        if (page.next_index <= query.start_index) return false;
+        query.start_index = page.next_index;
+    }
+    return rounds != 64 and snapshot.complete(ctx.detail_tick);
+}
 
-    ctx.sys.print("AUDIOD HDA evidence: OK candidates=");
-    ctx.sys.printU64(candidate_count);
-    ctx.sys.print(" selected=");
-    ctx.sys.printU64(selected_count);
-    ctx.sys.print(" core=");
-    ctx.sys.printU64(core_count);
-    ctx.sys.print(" runtime=");
-    ctx.sys.printU64(runtime_count);
-    ctx.sys.print(" bytes=");
+fn exportHdaEvidence(ctx: *const DiagApi, path: [*:0]const u8, path_text: []const u8, snapshot: *const hda_details.Snapshot) bool {
+    if (!snapshot.complete(ctx.detail_tick)) return hdaExportFail(ctx, "incomplete-snapshot");
+    var header: [384]u8 = undefined;
+    const identity = @import("std").fmt.bufPrint(&header, "HDA.SNAPSHOT v=1 epoch={x:0>16} sequence={d} handle={x:0>16} output={d} reset={d} pci={x:0>6} capture_tick={d} lines={d} parts={d}\r\n", .{ snapshot.epoch, snapshot.sequence, snapshot.handle, snapshot.output, snapshot.reset, snapshot.pci, snapshot.capture_tick, snapshot.expected_lines, snapshot.expected_parts }) catch return hdaExportFail(ctx, "identity");
+    _ = ctx.sys.fileDelete(path);
+    if (ctx.sys.fileWrite(path, identity) != @as(i32, @intCast(identity.len))) return hdaExportFail(ctx, "identity-write");
+    var total_bytes: usize = identity.len;
+    for (0..snapshot.expected_lines) |index| {
+        const body = snapshot.bodyAt(index);
+        if (ctx.sys.fileAppend(path, body) != @as(i32, @intCast(body.len)) or ctx.sys.fileAppend(path, "\r\n") != 2) return hdaExportFail(ctx, "snapshot-write");
+        total_bytes += body.len + 2;
+    }
+    ctx.sys.print("AUDIOD HDA evidence: OK coherent=1 bytes=");
     ctx.sys.printU64(total_bytes);
     ctx.sys.print(" path=");
     ctx.sys.println(path_text);
     return true;
-}
-
-fn hdaRecordCount(ctx: *const r4os.r4sys.Context, search: []const u8) ?u32 {
-    var query = r4os.abi.LogServiceRecordQuery{
-        .source_id = r4os.abi.log_service_source_driver,
-        .severity_min = r4os.abi.log_severity_debug,
-    };
-    copyFixedZ(query.search[0..], search);
-    var page = r4os.abi.LogServiceRecordPage{};
-    if (ctx.logServiceRecords(&query, &page) != r4os.abi.service_api_result_ok) return null;
-    return page.total_matches;
 }
 
 fn hdaExportFail(ctx: *const DiagApi, stage: []const u8) bool {

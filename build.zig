@@ -20,6 +20,12 @@ pub fn build(b: *std.Build) void {
     const run_pattern_tests = b.addRunArtifact(pattern_tests);
 
     const test_step = b.step("test", "Run deterministic PCM pattern tests");
+    const details_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/hda_details.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(details_tests).step);
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_pattern_tests.step);
 }

@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.18`
+- Version: `0.2.19`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -12,12 +12,17 @@
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
 
+Version0.2.19 also requires AUDSVC0.1.22 request durations to be explicitly
+unavailable: the public flag and all six UINT64_MAX fields must agree.
+Its output prints `duration=unavailable(retired)` and preserves actual
+PCM acceptance, loss/errors, selection, progress and terminal-Close checks.
+Historical measured providers can still be displayed numerically; they do
+not satisfy the current retired-duration oracle.
+
 Version0.2.18 keeps the actual accepted-PCM, loss/error, deadline-worker and
 terminal-Close checks. Retired Kernel/HDA/AC97 detail durations must be
 explicitly unavailable in the current Contract0.64.61 summary; their old
-monotonicity assertions and numeric latency display are removed. Service
-request timings and HDA owner-bound completion snapshots are separate and
-retain their existing meaning.
+monotonicity assertions and numeric latency display are removed. HDA owner-bound completion snapshots retain their existing meaning.
 
 Version0.2.17 validates explicitly requested HDA46 completion snapshots.
 Enable `OPTION HDA details=on` before driver initialization. The Test profile

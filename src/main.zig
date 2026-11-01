@@ -163,10 +163,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_after.stream_close_requests > service_before.stream_close_requests and
         status_after.silence_write_count >= service_before.silence_write_count + 2 and
         status_after.silence_bytes >= service_before.silence_bytes + silence.len * 2 and
-        status_after.request_total_ticks >= service_before.request_total_ticks and
-        status_after.request_max_ticks >= status_after.request_last_ticks and
-        status_after.write_request_total_ticks >= service_before.write_request_total_ticks and
-        status_after.write_request_max_ticks >= status_after.write_request_last_ticks;
+        serviceDurationsUnavailable(service_before) and serviceDurationsUnavailable(status_after);
     const performance_ok = audioDurationsUnavailable(perf_before) and audioDurationsUnavailable(perf_after) and perf_after.audio_stream_writes >= perf_before.audio_stream_writes + write_count and
         // The worker may coalesce input packets. Exact admitted byte work,
         // zero loss/errors and acknowledged drain remain separate requirements.
@@ -827,7 +824,23 @@ fn printAudioWork(ctx: *const DiagApi, summary: r4os.abi.ProgramPerformanceSumma
     ctx.sys.write("\r\n");
 }
 
+fn serviceDurationsUnavailable(status: r4os.abi.AudioServiceStatus) bool {
+    return (status.flags & r4os.abi.audio_service_flag_duration_unavailable) != 0 and
+        status.request_total_ticks == r4os.abi.audio_duration_ticks_unavailable and
+        status.request_max_ticks == r4os.abi.audio_duration_ticks_unavailable and
+        status.request_last_ticks == r4os.abi.audio_duration_ticks_unavailable and
+        status.write_request_total_ticks == r4os.abi.audio_duration_ticks_unavailable and
+        status.write_request_max_ticks == r4os.abi.audio_duration_ticks_unavailable and
+        status.write_request_last_ticks == r4os.abi.audio_duration_ticks_unavailable;
+}
+
 fn printServiceLatency(ctx: *const DiagApi, status: r4os.abi.AudioServiceStatus) void {
+    if (serviceDurationsUnavailable(status)) {
+        ctx.sys.print("AUDIOD service latency: duration=unavailable(retired) lastBytes=");
+        ctx.sys.printU64(@intCast(status.last_write_bytes));
+        ctx.sys.write("\r\n");
+        return;
+    }
     ctx.sys.print("AUDIOD service latency: reqTicks=");
     ctx.sys.printU64(status.request_last_ticks);
     ctx.sys.print("/");

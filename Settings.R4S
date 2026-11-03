@@ -1,6 +1,8 @@
-# AudioDiag repository path mappings. Relative to this repository root.
+﻿# AudioDiag repository path mappings. Relative to this repository root.
 SDK_ROOT=../../SDK
 CONTRACT_ROOT=../../Contract
 DEVKIT_ROOT=../../../DevKit
 ARTIFACTS_ROOT=../../../Artifacts/Modules/AudioDiag
 ZIG_ROOT=Toolchains/Zig
+
+LIBRARIES_ROOT=../../Libraries

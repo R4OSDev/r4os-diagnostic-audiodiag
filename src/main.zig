@@ -1,4 +1,5 @@
 const r4os = @import("r4os");
+const budgets = @import("budget.zig");
 const pattern = @import("pattern.zig");
 const hda_details = @import("hda_details.zig");
 const master_persist_wait_ms: u64 = 15_000;
@@ -11,14 +12,17 @@ const DiagApi = struct {
     detail_sequence: u64 = 0,
     detail_tick: u64 = 0,
 
-    fn init(app: *r4os.App) ?DiagApi {
+    fn init(app: *r4os.App2) ?DiagApi {
         return .{ .sys = app.system(), .audio = app.audio() orelse return null, .performance = (app.devices() orelse return null).performance() };
     }
 };
 
-pub fn r4_app_main(app: *r4os.App) i32 {
+pub fn r4_app_main(app: *r4os.App2) i32 {
     var ctx = DiagApi.init(app) orelse return r4os.abi.err_no_group;
     const args = app.args();
+    var argument_failure: r4os.arguments.Failure = .{};
+    var arguments = app.argCursor(.{ .quotes = 0 }, &argument_failure) catch return 2;
+    while (arguments.next() catch return 2) |_| {}
     if (containsIgnoreCase(args, "/GAP")) return @import("gap.zig").run(&ctx);
     if (containsIgnoreCase(args, "/PROGRESS")) return @import("progress.zig").run(&ctx);
     const long_mode = containsIgnoreCase(args, "/LONG");
@@ -43,13 +47,14 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.print("AUDIOD service=AUDSVC status=");
     ctx.sys.println(if (service_ready) "OK" else "FAILED");
     if (!service_ready) return fail(&ctx, "audio service status");
+    if (!@import("capabilities.zig").check(app, &ctx.audio)) return fail(&ctx, "output/capture catalog");
     var log_status: r4os.abi.LogServiceStatus = .{};
     if (ctx.sys.logServiceStatus(&log_status) == 0 and log_status.magic == r4os.abi.log_service_status_magic and log_status.version == r4os.abi.log_service_version)
         ctx.detail_sequence = log_status.total_records;
     ctx.detail_tick = ctx.sys.ticks();
     const service_before = status;
 
-    var stream = switch (ctx.audio.openStream(pattern.sample_rate, pattern.channels, .s16le, 0x00010000, r4os.time_contract.timeoutForever())) {
+    var stream = switch (ctx.audio.openStream(pattern.sample_rate, pattern.channels, .s16le, 0x00010000, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .stream => |value| value,
         else => return fail(&ctx, "audio_open_stream"),
     };
@@ -57,12 +62,12 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     ctx.sys.printU64(stream.stream_id);
     ctx.sys.write("\r\n");
 
-    const silent_written = switch (stream.write(&silence, r4os.time_contract.timeoutForever())) {
+    const silent_written = switch (stream.write(&silence, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .written => |bytes| bytes,
         else => 0,
     };
     var status_silent: r4os.abi.AudioServiceStatus = .{};
-    const silent_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutForever(), &status_silent)) {
+    const silent_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }), &status_silent)) {
         .ok => true,
         else => false,
     };
@@ -71,7 +76,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
         status_silent.lazy_open_count == service_before.lazy_open_count and
         status_silent.silence_write_count > service_before.silence_write_count and
         status_silent.silence_bytes >= service_before.silence_bytes + silence.len;
-    const volume_ok = switch (stream.setVolume(0x00010000, r4os.time_contract.timeoutForever())) {
+    const volume_ok = switch (stream.setVolume(0x00010000, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .ok => true,
         else => false,
     };
@@ -114,7 +119,7 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     }
 
     var status_signal: r4os.abi.AudioServiceStatus = .{};
-    const signal_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutForever(), &status_signal)) {
+    const signal_status_ok = switch (ctx.audio.status(r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }), &status_signal)) {
         .ok => true,
         else => false,
     };
@@ -130,18 +135,18 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     // on incidental producer latency rather than IRQ/worker correctness.
     const asynchronous_progress_ok = writes_ok and waitForDeadlineProgress(&ctx, work_before.deadline_submitted, work_before.deadline_started);
 
-    const idle_written = switch (stream.write(&silence, r4os.time_contract.timeoutForever())) {
+    const idle_written = switch (stream.write(&silence, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .written => |bytes| bytes,
         else => 0,
     };
 
-    const closed_ok = switch (stream.close(r4os.time_contract.timeoutForever())) {
+    const closed_ok = switch (stream.close(r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .ok => true,
         else => false,
     };
 
     var status_after: r4os.abi.AudioServiceStatus = .{};
-    const service_status_after_ok = switch (ctx.audio.status(r4os.time_contract.timeoutForever(), &status_after)) {
+    const service_status_after_ok = switch (ctx.audio.status(r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }), &status_after)) {
         .ok => true,
         else => false,
     };
@@ -392,10 +397,10 @@ fn lifecycleFail(ctx: *const DiagApi, stage: []const u8) bool {
 }
 
 fn writeLifecycleSample(ctx: *const DiagApi, stream_id: u32, sample: []const u8) bool {
-    const started = ctx.sys.ticks();
-    const max_ticks = ctx.sys.ticksFromMilliseconds(5000);
+    var budget = budgets.milliseconds(&ctx.sys, 5000) catch return false;
     const poll_ticks = @max(ctx.sys.ticksFromMilliseconds(10), 1);
-    while (ctx.sys.ticks() -| started < max_ticks) {
+    while (true) {
+        _ = budget.remainingTicks() catch break;
         const result = ctx.sys.audioServiceWrite(stream_id, sample);
         if (result == @as(i32, @intCast(sample.len))) return true;
         if (result != r4os.abi.service_api_result_busy) {
@@ -427,9 +432,9 @@ fn printHdaRecord(ctx: *const DiagApi, search: []const u8) void {
         .severity_min = r4os.abi.log_severity_debug,
     };
     copyFixedZ(query.search[0..], search);
-    const started = ctx.sys.ticks();
-    const max_ticks = ctx.sys.ticksFromMilliseconds(1000);
-    while (ctx.sys.ticks() -| started < max_ticks) {
+    var budget = budgets.milliseconds(&ctx.sys, 1000) catch return;
+    while (true) {
+        _ = budget.remainingTicks() catch break;
         var page = r4os.abi.LogServiceRecordPage{};
         if (ctx.sys.logServiceRecords(&query, &page) == r4os.abi.service_api_result_ok and page.count != 0) {
             const record = &page.records[page.count - 1];
@@ -493,9 +498,9 @@ noinline fn waitForHdaDiagnostic(ctx: *const DiagApi, path: ?[*:0]const u8, path
     const runtime_fields = [_][]const u8{
         "phase=close", " irq=", " pos=", " pmis=", " pfb=", " wr=", " und=", " fifo=", " dese=", " prec=", " rec=", " to=", " drain=", " wdrop=", " own=",
     };
-    const started = ctx.sys.ticks();
-    const max_ticks = ctx.sys.ticksFromMilliseconds(5000);
-    while (ctx.sys.ticks() -| started < max_ticks) {
+    var budget = budgets.milliseconds(&ctx.sys, 5000) catch return false;
+    while (true) {
+        _ = budget.remainingTicks() catch break;
         var snapshot: hda_details.Snapshot = .{};
         if (collectHdaSnapshot(ctx, &snapshot) and snapshot.contains("HDA.DIAG core", &core_fields) and
             snapshot.contains("HDA.DIAG run phase=close", &runtime_fields) and
@@ -575,42 +580,29 @@ fn hdaExportFail(ctx: *const DiagApi, stage: []const u8) bool {
 }
 
 fn argumentValue(args: []const u8, name: []const u8) ?[]const u8 {
-    var rest = trimSpaces(args);
-    while (rest.len != 0) {
-        var end: usize = 0;
-        while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') : (end += 1) {}
-        var token = rest[0..end];
+    var failure: r4os.arguments.Failure = .{};
+    var cursor = r4os.arguments.ArgCursor.init(args, .{ .quotes = 0 }, &failure) catch return null;
+    while (cursor.next() catch return null) |raw| {
+        var token = raw.bytes(args) catch return null;
         if (token.len != 0 and (token[0] == '/' or token[0] == '-')) token = token[1..];
         if (token.len > name.len and token[name.len] == '=' and sameIgnoreCase(token[0..name.len], name)) {
             const value = token[name.len + 1 ..];
-            if (value.len != 0 and value.len < evidence_path_capacity) return value;
-            return null;
+            return if (value.len != 0 and value.len < evidence_path_capacity) value else null;
         }
-        rest = trimSpaces(rest[end..]);
     }
     return null;
 }
 
 fn argumentSpecified(args: []const u8, name: []const u8) bool {
-    var rest = trimSpaces(args);
-    while (rest.len != 0) {
-        var end: usize = 0;
-        while (end < rest.len and rest[end] != ' ' and rest[end] != '\t') : (end += 1) {}
-        var token = rest[0..end];
+    var failure: r4os.arguments.Failure = .{};
+    var cursor = r4os.arguments.ArgCursor.init(args, .{ .quotes = 0 }, &failure) catch return false;
+    while (cursor.next() catch return false) |raw| {
+        var token = raw.bytes(args) catch return false;
         if (token.len != 0 and (token[0] == '/' or token[0] == '-')) token = token[1..];
         if (token.len >= name.len and sameIgnoreCase(token[0..name.len], name) and
             (token.len == name.len or token[name.len] == '=')) return true;
-        rest = trimSpaces(rest[end..]);
     }
     return false;
-}
-
-fn trimSpaces(value: []const u8) []const u8 {
-    var start: usize = 0;
-    var end = value.len;
-    while (start < end and (value[start] == ' ' or value[start] == '\t')) : (start += 1) {}
-    while (end > start and (value[end - 1] == ' ' or value[end - 1] == '\t')) : (end -= 1) {}
-    return value[start..end];
 }
 
 fn sameIgnoreCase(a: []const u8, b: []const u8) bool {
@@ -642,13 +634,10 @@ fn containsText(value: []const u8, needle: []const u8) bool {
 // A timeout has ambiguous remote acceptance and is never blindly resent.
 fn writePcmFully(ctx: *const DiagApi, stream: *r4os.AudioStream, pcm: []const u8) usize {
     var cursor = r4os.app_audio.WriteCursor.init(pcm.len, pattern.frame_bytes) orelse return 0;
-    const began = ctx.sys.ticks();
-    const limit = @max(ctx.sys.ticksFromMilliseconds(1000), 1);
+    var budget = budgets.milliseconds(&ctx.sys, 1000) catch return 0;
     while (!cursor.done()) {
-        const elapsed = ctx.sys.ticks() -| began;
-        if (elapsed >= limit) break;
-        const duration = r4os.time_contract.durationFromTicks(limit - elapsed, ctx.sys.monotonicHz()) catch break;
-        const advanced = cursor.apply(stream.write(pcm[cursor.accepted..], r4os.time_contract.timeoutFinite(duration)));
+        const timeout = r4os.rpc_budget.remainingTimeout(&budget) catch break;
+        const advanced = cursor.apply(stream.write(pcm[cursor.accepted..], timeout));
         switch (advanced.outcome) {
             .complete => return cursor.accepted,
             .retry => ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(1), 1)),
@@ -659,45 +648,47 @@ fn writePcmFully(ctx: *const DiagApi, stream: *r4os.AudioStream, pcm: []const u8
 }
 
 fn waitForDeadlineProgress(ctx: *const DiagApi, submitted: u64, started: u64) bool {
-    const began = ctx.sys.ticks();
-    const timeout = @max(ctx.sys.ticksFromMilliseconds(100), 1);
+    var budget = budgets.milliseconds(&ctx.sys, 100) catch return false;
     while (true) {
         const work = ctx.performance.driverWork(0) orelse return false;
         if (work.deadline_submitted > submitted and work.deadline_started > started) return true;
-        if (ctx.sys.ticks() -| began >= timeout) return false;
-        ctx.sys.sleepTicks(@max(ctx.sys.ticksFromMilliseconds(1), 1));
+        const remaining = budget.remainingTicks() catch return false;
+        ctx.sys.sleepTicks(@min(@max(ctx.sys.ticksFromMilliseconds(1), 1), remaining));
     }
 }
 
 fn waitServiceStatus(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceStatus, max_ticks: u64) bool {
     const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
-    const started = ctx.ticks();
-    while (ctx.ticks() -| started < max_ticks) {
+    var budget = budgets.ticks(ctx, max_ticks) catch return false;
+    while (true) {
+        const remaining = budget.remainingTicks() catch return false;
         if (ctx.audioServiceStatus(out) == r4os.abi.service_api_result_ok) return true;
-        ctx.sleepTicks(poll_ticks);
+        ctx.sleepTicks(@min(poll_ticks, remaining));
     }
     return false;
 }
 
 fn waitMasterState(ctx: *const r4os.r4sys.Context, out: *r4os.abi.AudioServiceMasterState, max_ticks: u64) bool {
     const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
-    const started = ctx.ticks();
-    while (ctx.ticks() -| started < max_ticks) {
+    var budget = budgets.ticks(ctx, max_ticks) catch return false;
+    while (true) {
+        const remaining = budget.remainingTicks() catch return false;
         if (ctx.audioServiceMasterState(out) == r4os.abi.service_api_result_ok) return true;
-        ctx.sleepTicks(poll_ticks);
+        ctx.sleepTicks(@min(poll_ticks, remaining));
     }
     return false;
 }
 
 fn waitMasterPersisted(ctx: *const r4os.r4sys.Context, baseline_writes: u64, out: *r4os.abi.AudioServiceMasterState, max_ticks: u64) bool {
     const poll_ticks = @max(ctx.ticksFromMilliseconds(100), 1);
-    const started = ctx.ticks();
-    while (ctx.ticks() -| started < max_ticks) {
+    var budget = budgets.ticks(ctx, max_ticks) catch return false;
+    while (true) {
+        const remaining = budget.remainingTicks() catch return false;
         if (ctx.audioServiceMasterState(out) == r4os.abi.service_api_result_ok and
             out.persist_writes > baseline_writes and
             (out.flags & r4os.abi.audio_master_state_flag_persist_pending) == 0)
             return true;
-        ctx.sleepTicks(poll_ticks);
+        ctx.sleepTicks(@min(poll_ticks, remaining));
     }
     return false;
 }
@@ -749,26 +740,25 @@ fn printDeadlinePath(ctx: *const DiagApi, after: r4os.abi.ProgramDriverWorkPerfo
 }
 
 fn waitForAudioService(ctx: *const DiagApi, status: *r4os.abi.AudioServiceStatus) bool {
-    const state = ctx.sys.timeState();
-    const deadline = ctx.sys.ticks() +| @as(u64, @max(state.monotonic_hz, 1)) * 30;
-    while (ctx.sys.ticks() < deadline) {
-        switch (ctx.audio.status(r4os.time_contract.timeoutForever(), status)) {
+    var budget = budgets.milliseconds(&ctx.sys, 30_000) catch return false;
+    while (true) {
+        const timeout = r4os.rpc_budget.remainingTimeout(&budget) catch return false;
+        switch (ctx.audio.status(timeout, status)) {
             .ok => return true,
+            .timed_out => return false,
             else => ctx.sys.sleepTicks(1),
         }
     }
-    return false;
 }
 
 fn waitForBackendQueueRoom(ctx: *const DiagApi, target_periods: u64) bool {
-    const state = ctx.sys.timeState();
-    const deadline = ctx.sys.ticks() +| @as(u64, @max(state.monotonic_hz, 1)) * 5;
-    while (ctx.sys.ticks() < deadline) {
+    var budget = budgets.milliseconds(&ctx.sys, 5000) catch return false;
+    while (true) {
         const summary = ctx.performance.summary() orelse return false;
         if (summary.audio_backend_queued_buffers < target_periods) return true;
+        _ = budget.remainingTicks() catch return false;
         ctx.sys.sleepTicks(1);
     }
-    return false;
 }
 
 fn fail(ctx: *const DiagApi, stage: []const u8) i32 {

@@ -14,11 +14,12 @@ fn transportFailure(ctx: anytype, stage: []const u8, outcome: []const u8, raw: ?
     ctx.sys.println(std.fmt.bufPrint(&line, "AUDIOD GAP detail stage={s} outcome={s} raw={?d} stream={d} rpc-timeout-ns=100000000", .{stage,outcome,raw,stream}) catch "AUDIOD GAP detail formatting failed");
 }
 
-fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgressRequest, out: *a.AudioServiceStreamProgressState, deadline: u64, closing: bool, close_attempts: *u32) bool {
+fn query(ctx: anytype, stream: *r.AudioStream, key: a.AudioServiceStreamProgressRequest, out: *a.AudioServiceStreamProgressState, budget: *r.rpc_budget.Budget, closing: bool, close_attempts: *u32) bool {
     const op = if (closing) a.audio_service_op_close_stream_progress else a.audio_service_op_stream_progress;
-    while (ctx.sys.ticks() < deadline) {
+    while (true) {
+        const remaining = r.rpc_budget.remainingTimeout(budget) catch break;
         if (closing) close_attempts.* += 1;
-        const response = stream.connection.callTyped(a.AudioServiceStreamProgressRequest, a.AudioServiceStreamProgressState, op, &key, r.time_contract.timeoutFinite(.{ .nanoseconds = 100_000_000 }));
+        const response = stream.connection.callTyped(a.AudioServiceStreamProgressRequest, a.AudioServiceStreamProgressState, op, &key, .{ .kind = a.timeout_kind_finite, .nanoseconds = @min(remaining.nanoseconds, 100_000_000) });
         switch (response) {
             .value => |value| {
                 if (value.result == a.service_api_result_busy) {
@@ -54,7 +55,7 @@ fn sameBackend(first: a.AudioServiceStreamProgressState, current: a.AudioService
 
 pub fn run(ctx: anytype) i32 {
     ctx.sys.println("AUDIOD GAP: service48000Hz stereo-S16 signal480/null480/signal480; no speaker receipt");
-    const deadline = ctx.sys.ticks() +| ctx.sys.ticksFromMilliseconds(3000);
+    var deadline = @import("budget.zig").milliseconds(&ctx.sys, 3000) catch return fail(ctx, "clock/budget");
     const timeout = r.time_contract.timeoutFinite(.{ .nanoseconds = 100_000_000 });
     var before: a.AudioServiceStatus = .{};
     if (ctx.sys.audioServiceStatus(&before) != 0) return fail(ctx, "service before");
@@ -80,7 +81,7 @@ pub fn run(ctx: anytype) i32 {
             .written => |n| if (n != bytes.len) return fail(ctx, "complete PCM write"),
             else => return fail(ctx, "write"),
         }
-        if (!query(ctx, &stream, key, &current, deadline, false, &close_attempts)) return fail(ctx, "progress");
+        if (!query(ctx, &stream, key, &current, &deadline, false, &close_attempts)) return fail(ctx, "progress");
         if (index == 0) {
             first = current;
             key.service_epoch = first.service_epoch;
@@ -94,7 +95,7 @@ pub fn run(ctx: anytype) i32 {
             return fail(ctx, "no silent close/reopen");
     }
     var closed: a.AudioServiceStreamProgressState = .{};
-    if (!query(ctx, &stream, key, &closed, deadline, true, &close_attempts)) return fail(ctx, "terminal close");
+    if (!query(ctx, &stream, key, &closed, &deadline, true, &close_attempts)) return fail(ctx, "terminal close");
     if (!sameBackend(first, closed) or (closed.progress.flags & a.audio_progress_closed) == 0 or
         (closed.progress.flags & a.audio_progress_device_valid) == 0 or closed.progress.accepted_frames != 1440 or
         closed.progress.backend_frames != 1440 or closed.progress.submitted_frames != 1440 or closed.progress.consumed_frames != 1440 or

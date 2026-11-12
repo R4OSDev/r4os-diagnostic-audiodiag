@@ -4,7 +4,7 @@
 
 ## Package
 
-- Version: `0.2.19`
+- Version: `0.2.21`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
@@ -133,3 +133,10 @@ The 8,280-frame signal is unchanged. A fast producer must not fail the
 asynchronous-lane check merely because all writes precede the first IRQ.
 A missing worker or timeout still fails; zero new misses, overruns, drops
 and backend errors remain mandatory.
+
+API migration 0.90.82
+--------------------
+The normal App2/Query2 consumer reads complete typed output epochs and the real AUDSVC capture catalog before playback. It reports unavailable input/ADC separately; discovery opens no recording stream and proves no speaker output. Playback and GAP/PROGRESS polling use common generation-checked deadlines; acknowledged PCM prefixes and original time limits remain. Existing exact PCM, lazy silence, master/mute persistence, service restart, stream generations and release checks remain strict; retired duration fields remain unavailable.
+
+Local source, artifact and runtime evidence: Research/API-ABI/Migration/0.90.82/
+in the coordinating workspace. Physical hardware and Windows are separate qualifications.

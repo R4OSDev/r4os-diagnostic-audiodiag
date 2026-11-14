@@ -135,10 +135,9 @@ pub fn r4_app_main(app: *r4os.App2) i32 {
     // on incidental producer latency rather than IRQ/worker correctness.
     const asynchronous_progress_ok = writes_ok and waitForDeadlineProgress(&ctx, work_before.deadline_submitted, work_before.deadline_started);
 
-    const idle_written = switch (stream.write(&silence, r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
-        .written => |bytes| bytes,
-        else => 0,
-    };
+    // The long producer can fill both queues. Preserve acknowledged prefixes
+    // for this final clocked zero block exactly as for every signal quantum.
+    const idle_written = writePcmFully(&ctx, &stream, &silence);
 
     const closed_ok = switch (stream.close(r4os.time_contract.timeoutFinite(.{ .nanoseconds = 1_000_000_000 }))) {
         .ok => true,

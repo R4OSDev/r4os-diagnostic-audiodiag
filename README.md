@@ -4,13 +4,20 @@
 
 ## Package
 
-- Version: `0.2.21`
+- Version: `0.2.23`
 - Image target: `/R4OS/SOFTWARE/TERMINAL/DIAG/AUDIOD.R4X`
 - Image scope: `test`
 - Canonical project manifest: `module.R4MF`
 
 The manifest is the single source of truth for the artifact, imports, image
 target, and package metadata.
+
+Version 0.2.23 sends the final clocked zero block through the same bounded
+write cursor as signal PCM. A full ring in /LONG can return a partial or zero
+acceptance; the diagnostic now preserves that prefix and submits the remaining
+bytes within the existing one-second deadline. Timeouts are not blindly
+resent. PCM/frame/error, source generation, terminal Close, service-counter
+and driver-work deadline oracles remain unchanged.
 
 Version0.2.19 also requires AUDSVC0.1.22 request durations to be explicitly
 unavailable: the public flag and all six UINT64_MAX fields must agree.
@@ -92,8 +99,9 @@ boot or subsystem audio in the same capture cannot mask it. It merges only
 sub-2-ms resampler crossings and checks the observed duration within a
 five-percent tolerance.
 The default run also proves a silent logical stream stays unmaterialized,
-signal lazily opens the backend, later silence closes it once, and the
-DriverApi-v20 audio lane records productive work without a new deadline miss,
+signal lazily opens the backend, active silence retains its stream until
+explicit Close, and the
+current deadline-isolated audio lane records productive work without a new deadline miss,
 budget overrun, or admission rejection.
 It then restarts AUDSVC, replays four bounded partial-period
 Open/Write/Close cycles, proves all logical and materialized sessions return
